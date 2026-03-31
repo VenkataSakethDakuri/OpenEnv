@@ -1,10 +1,14 @@
 """
-Inference Script — Inventory Optimization Environment
-=======================================================
+Inference Script - Inventory Optimization Environment
+=====================================================
 Required env vars:
     API_BASE_URL   The API endpoint for the LLM.
     MODEL_NAME     The model identifier to use for inference.
-    HF_TOKEN       Your Hugging Face / API key.
+    HF_TOKEN       Hugging Face token (preferred for HF Router).
+
+Supported key env vars (first non-empty wins): HF_TOKEN, API_KEY, OPENAI_API_KEY.
+For non-OpenAI endpoints, a dummy key is used when no key is provided because
+the OpenAI Python SDK requires a non-empty api_key argument.
 """
 
 import os
@@ -17,18 +21,21 @@ load_dotenv()
 from openai import OpenAI
 
 from server.inventory_env import InventoryEnvironment
-from server.constants import EXTRA_INVENTORY_COST
+from server.constants import EXTRA_INVENTORY_COST, EVENT_DURATION
 from models import InventoryAction
 
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN") 
 MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_DAYS = 30
-
 
 SYSTEM_PROMPT = textwrap.dedent("""
     You are an inventory management AI agent. Each day you receive the current state
     of a retail store with 5 products: electronics, clothing, groceries, furniture, toys.
+
+    You will be shown your decision history from recent days so you can learn from
+    past outcomes. Use this history to spot demand trends, identify what worked vs.
+    what didn't, and adjust your strategy accordingly.
 
     Groceries are perishable (5-day shelf life). Other products don't expire.
 
@@ -42,12 +49,14 @@ SYSTEM_PROMPT = textwrap.dedent("""
     Weekends (day%7 == 5 or 6) have 1.2x demand.
 
     CRITICAL STRATEGY:
-    - You MUST restock products when inventory is low. If you don't buy, you run out of
-      stock and miss sales. Missed sales = lost revenue = negative reward.
-    - Check today's demand to estimate tomorrow's needs.
+    - Review your history: if reward was negative, identify why and change approach.
+    - Track demand trends across days — if a product's demand is rising, stock up early.
+    - You MUST restock products when inventory is low. Missed sales = lost revenue = negative reward.
     - Do NOT overbuy when demand is low — unsold stock ties up cash and perishables expire.
     - Prioritize high-margin products: furniture ($70 profit), electronics ($50 profit).
-    - Stock up BEFORE events hit (check event countdowns).
+    - Stock up BEFORE events hit (check event countdowns — order 3-5 days ahead using slow/medium shipping).
+    - When no events are approaching, slow shipping is often sufficient and saves significant cost.
+    - Near end of episode (last 2 days), stop buying — focus on selling remaining stock.
 
     Each day you must respond with a JSON action:
     {
@@ -61,11 +70,18 @@ SYSTEM_PROMPT = textwrap.dedent("""
     - liquidate: products and amounts to dispose of (no revenue, empty {} to skip)
       Use liquidate to free up warehouse space before a restock.
 
-    You will see what demand occurred today AFTER it happened. Use this to spot trends
-    and plan restocking. A negative reward means your last action was bad — adjust.
+    LEARNING FROM HISTORY:
+    - Compare your past buy quantities to the demand that followed — were you over or under?
+    - If you see repeated stockouts for a product, increase orders for it.
+    - If groceries expired, you overbought — reduce grocery orders or use faster shipping.
+    - A negative reward means your last action was bad — adjust immediately.
 
-    Do NOT buy more than you can afford. Do NOT buy on the last day.
-    Respond with ONLY valid JSON, no explanation.
+    Before responding with JSON, briefly reason (2-3 lines max):
+    1. What did I learn from recent history? What went wrong/right?
+    2. What products need restocking vs. are overstocked?
+    3. Are any events approaching?
+
+    Then output ONLY the final JSON action on the last line.
 """).strip()
 
 
@@ -90,8 +106,10 @@ def format_observation(obs):
     for event, days in obs.updated_events.items():
         if days > 0:
             event_lines.append(f"  {event}: in {days} days")
-        else:
+        elif -EVENT_DURATION < days <= 0:
             event_lines.append(f"  {event}: ACTIVE NOW")
+        else:
+            event_lines.append(f"  {event}: ended")
     events_text = "\n".join(event_lines) if event_lines else "  None"
 
     # format deliveries
@@ -103,7 +121,7 @@ def format_observation(obs):
             delivery_lines.append(f"  {product}: {qty} units arriving in {days_away} days")
     deliveries_text = "\n".join(delivery_lines) if delivery_lines else "  None"
 
-    # format demand (already happened today — feedback, not prediction)
+    # format demand (yesterday's demand — feedback, not prediction)
     demand_lines = []
     for product, units in obs.demand_today.items():
         demand_lines.append(f"  {product}: {units} units")
@@ -118,7 +136,7 @@ Last Step Reward: {obs.reward:.3f}
 Inventory:
 {inv_text}
 
-Demand That Occurred Today:
+Yesterday's Demand:
 {demand_text}
 
 Upcoming Events:
@@ -133,15 +151,39 @@ Respond with your action as JSON."""
 
 
 def parse_action(response_text):
-    """Parse LLM response into InventoryAction."""
+    """Parse LLM response into InventoryAction. Extracts JSON even if surrounded by text."""
     try:
         text = response_text.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1]
-            text = text.rsplit("```", 1)[0]
+
+        # strip markdown code fences
+        if "```" in text:
+            parts = text.split("```")
+            for part in parts:
+                part = part.strip()
+                if part.startswith("json"):
+                    part = part[4:].strip()
+                if part.startswith("{"):
+                    text = part
+                    break
+
+        # find the first { and last } to extract JSON
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
 
         data = json.loads(text)
-        return InventoryAction(**data)
+
+        # only keep valid fields
+        clean = {}
+        if "buy_quantities" in data:
+            clean["buy_quantities"] = data["buy_quantities"]
+        if "delivery_method" in data:
+            clean["delivery_method"] = data["delivery_method"]
+        if "liquidate" in data:
+            clean["liquidate"] = data["liquidate"]
+
+        return InventoryAction(**clean)
     except Exception as e:
         print(f"  [DEBUG] Parse FAILED: {e}")
         print(f"  [DEBUG] Raw LLM response: {response_text[:500]}")
@@ -150,6 +192,9 @@ def parse_action(response_text):
             delivery_method="slow",
             liquidate={},
         )
+
+
+HISTORY_WINDOW = 15  # rolling window of past days to include in context
 
 
 def run_task(client, task_name):
@@ -161,6 +206,9 @@ def run_task(client, task_name):
     print(f"Task: {task_name.upper()} | Cash: ${obs.total_cash:.2f} | Days: {env.max_days}")
     print(f"{'=' * 50}")
 
+    # Rolling history of (user_observation, assistant_response) pairs
+    history = []
+
     for day in range(1, env.max_days + 1):
         if obs.done:
             print("Episode ended early.")
@@ -168,10 +216,26 @@ def run_task(client, task_name):
 
         user_prompt = format_observation(obs)
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
+        # Build messages: system + history context + current observation
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        recent = history[-HISTORY_WINDOW:]
+        if recent:
+            # Tell the LLM it's about to see its past decisions and their outcomes
+            messages.append({
+                "role": "user",
+                "content": f"Here is your decision history from the last {len(recent)} day(s). "
+                           "Use this to identify demand trends, adjust restocking, and avoid repeating mistakes.",
+            })
+            messages.append({
+                "role": "assistant",
+                "content": "Understood. I'll review my past decisions and their outcomes to make better choices today.",
+            })
+            for past_user, past_assistant in recent:
+                messages.append({"role": "user", "content": past_user})
+                messages.append({"role": "assistant", "content": past_assistant})
+
+        messages.append({"role": "user", "content": user_prompt})
 
         try:
             completion = client.chat.completions.create(
@@ -185,6 +249,9 @@ def run_task(client, task_name):
         except Exception as exc:
             print(f"  LLM request failed: {exc}. Skipping turn.")
             response_text = "{}"
+
+        # Save this turn to rolling history
+        history.append((user_prompt, response_text))
 
         action = parse_action(response_text)
 
@@ -200,6 +267,9 @@ def run_task(client, task_name):
 
 def main():
     from server.grader import grade_all, compute_baselines
+
+    if not MODEL_NAME:
+        raise RuntimeError("MODEL_NAME is not set. Please export MODEL_NAME before running inference.")
 
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
@@ -227,4 +297,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main() 
