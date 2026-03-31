@@ -32,47 +32,85 @@ def _run_heuristic(task_name):
     env = InventoryEnvironment(task_name)
     obs = env.reset()
 
+    # track recent demand to adapt ordering
+    demand_history = {}
+
     while not obs.done:
         buy = {}
-        delivery = "medium"
         liquidate = {}
 
-        # check if any event is imminent (within 3 days)
-        event_soon = False
+        # determine nearest event distance
+        nearest_event_days = 999
         for event, days in obs.updated_events.items():
-            if 0 < days <= 3:
-                event_soon = True
-                break
+            if 0 < days < nearest_event_days:
+                nearest_event_days = days
+
+        # pick shipping based on urgency
+        if nearest_event_days <= 2:
+            delivery = "fast"
+        elif nearest_event_days <= 5:
+            delivery = "medium"
+        else:
+            delivery = "slow"
+
+        # update demand history from observation
+        if obs.demand_today:
+            for product, units in obs.demand_today.items():
+                if product not in demand_history:
+                    demand_history[product] = []
+                demand_history[product].append(units)
 
         for product, (lo, hi) in task["base_demand"].items():
             avg_demand = (lo + hi) // 2
+
+            # use recent demand if available (last 5 days)
+            if product in demand_history and len(demand_history[product]) >= 2:
+                recent = demand_history[product][-5:]
+                avg_demand = max(avg_demand, int(sum(recent) / len(recent)))
+
             current = sum(b[0] for b in obs.updated_inventory.get(product, []))
 
-            if event_soon:
-                # stock up 5 days' worth before events, use fast shipping
-                target = avg_demand * 5
-                delivery = "fast"
-            else:
-                # normal: keep 3 days' buffer
-                target = avg_demand * 3
+            # count in-transit units
+            in_transit = 0
+            for d in obs.updated_deliveries:
+                for p, shipment in d.items():
+                    if p == product:
+                        in_transit += shipment[0]
 
-            if current < target:
-                buy[product] = target - current
+            available = current + in_transit
+
+            # how many days of stock to target
+            if nearest_event_days <= 5:
+                target = avg_demand * 6
+            else:
+                target = avg_demand * 4
+
+            # prioritize high-margin products — order more aggressively
+            margin = BASE_PRICES[product] - COST_PRICES[product]
+            if margin >= 50:  # electronics, furniture
+                target = int(target * 1.3)
+
+            if available < target:
+                buy[product] = target - available
 
         # liquidate groceries about to expire (1 day left)
         for batch in obs.updated_inventory.get("groceries", []):
             if batch[1] is not None and batch[1] <= 1:
                 liquidate["groceries"] = liquidate.get("groceries", 0) + batch[0]
 
-        # don't buy on last 2 days
-        if obs.current_day >= task["max_days"] - 2:
+        # stop buying when deliveries can't arrive in time
+        days_left = task["max_days"] - obs.current_day
+        if delivery == "slow" and days_left <= 5:
+            buy = {}
+        elif delivery == "medium" and days_left <= 3:
+            buy = {}
+        elif delivery == "fast" and days_left <= 1:
             buy = {}
 
         # don't buy more than cash allows (rough check)
         total_cost = sum(qty * (COST_PRICES[p] + SHIPPING_COST[delivery]) for p, qty in buy.items())
-        if total_cost > obs.total_cash * 0.8:
-            # scale down proportionally
-            scale = (obs.total_cash * 0.8) / total_cost if total_cost > 0 else 0
+        if total_cost > obs.total_cash * 0.85:
+            scale = (obs.total_cash * 0.85) / total_cost if total_cost > 0 else 0
             buy = {p: max(1, int(qty * scale)) for p, qty in buy.items()}
 
         action = InventoryAction(
