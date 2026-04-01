@@ -2,12 +2,17 @@
 Grader for inventory optimization tasks.
 Scores agent performance on a 0.0-1.0 scale using floor/ceiling approach.
   - floor: passive agent (no buys, just sells initial stock until empty)
-  - ceiling: heuristic agent (buys to meet average demand each day)
+  - ceiling: theoretical max profit with perfect demand knowledge
 """
 
 from server.inventory_env import InventoryEnvironment
 from models import InventoryAction
-from server.constants import TASKS, BASE_PRICES, COST_PRICES, SHIPPING_COST
+from server.constants import (
+    TASKS, BASE_PRICES, COST_PRICES, SHIPPING_COST, EVENT_EFFECTS,
+    WEEKEND_MULTIPLIER, EVENT_DURATION,
+)
+
+import random
 
 
 def _run_passive(task_name):
@@ -27,100 +32,46 @@ def _run_passive(task_name):
 
 
 def _run_heuristic(task_name):
-    """Ceiling baseline: smart heuristic that stocks up before events."""
     task = TASKS[task_name]
-    env = InventoryEnvironment(task_name)
-    obs = env.reset()
+    events = dict(task["events"])
 
-    # track recent demand to adapt ordering
-    demand_history = {}
+    total_demand = {p: 0 for p in task["base_demand"]}
 
-    while not obs.done:
-        buy = {}
-        liquidate = {}
+    for day in range(1, task["max_days"] + 1):
+        # tick events
+        for event_name in events:
+            events[event_name] -= 1
 
-        # determine nearest event distance
-        nearest_event_days = 999
-        for event, days in obs.updated_events.items():
-            if 0 < days < nearest_event_days:
-                nearest_event_days = days
-
-        # pick shipping based on urgency
-        if nearest_event_days <= 2:
-            delivery = "fast"
-        elif nearest_event_days <= 5:
-            delivery = "medium"
-        else:
-            delivery = "slow"
-
-        # update demand history from observation
-        if obs.demand_today:
-            for product, units in obs.demand_today.items():
-                if product not in demand_history:
-                    demand_history[product] = []
-                demand_history[product].append(units)
+        rng = random.Random(task["seed"] * 1000 + day)
 
         for product, (lo, hi) in task["base_demand"].items():
-            avg_demand = (lo + hi) // 2
+            demand = rng.randint(lo, hi)
 
-            # use recent demand if available (last 5 days)
-            if product in demand_history and len(demand_history[product]) >= 2:
-                recent = demand_history[product][-5:]
-                avg_demand = max(avg_demand, int(sum(recent) / len(recent)))
+            # weekend boost
+            if day % 7 == 5 or day % 7 == 6:
+                demand = int(WEEKEND_MULTIPLIER * demand)
 
-            current = sum(b[0] for b in obs.updated_inventory.get(product, []))
+            # event multipliers
+            for event_name, days_left in events.items():
+                if -EVENT_DURATION < days_left <= 0 and event_name in EVENT_EFFECTS:
+                    mult = EVENT_EFFECTS[event_name].get(product, 1.0)
+                    demand = int(demand * mult)
 
-            # count in-transit units
-            in_transit = 0
-            for d in obs.updated_deliveries:
-                for p, shipment in d.items():
-                    if p == product:
-                        in_transit += shipment[0]
+            total_demand[product] += demand
 
-            available = current + in_transit
+    total_profit = 0.0
 
-            # how many days of stock to target
-            if nearest_event_days <= 5:
-                target = avg_demand * 6
-            else:
-                target = avg_demand * 4
+    # sell the initial stock first
+    initial_stock = task["initial_stock"]
 
-            # prioritize high-margin products — order more aggressively
-            margin = BASE_PRICES[product] - COST_PRICES[product]
-            if margin >= 50:  # electronics, furniture
-                target = int(target * 1.3)
+    for product in task["base_demand"]:
+        total_profit += min(initial_stock.get(product, 0), total_demand[product]) * BASE_PRICES[product]
+        total_demand[product] = max(0, total_demand[product] - initial_stock.get(product, 0))
 
-            if available < target:
-                buy[product] = target - available
+        # cost price and shipping cost applies after initial stock
+        total_profit += total_demand[product] * (BASE_PRICES[product] - COST_PRICES[product] - SHIPPING_COST["slow"])
 
-        # liquidate groceries about to expire (1 day left)
-        for batch in obs.updated_inventory.get("groceries", []):
-            if batch[1] is not None and batch[1] <= 1:
-                liquidate["groceries"] = liquidate.get("groceries", 0) + batch[0]
-
-        # stop buying when deliveries can't arrive in time
-        days_left = task["max_days"] - obs.current_day
-        if delivery == "slow" and days_left <= 5:
-            buy = {}
-        elif delivery == "medium" and days_left <= 3:
-            buy = {}
-        elif delivery == "fast" and days_left <= 1:
-            buy = {}
-
-        # don't buy more than cash allows (rough check)
-        total_cost = sum(qty * (COST_PRICES[p] + SHIPPING_COST[delivery]) for p, qty in buy.items())
-        if total_cost > obs.total_cash * 0.85:
-            scale = (obs.total_cash * 0.85) / total_cost if total_cost > 0 else 0
-            buy = {p: max(1, int(qty * scale)) for p, qty in buy.items()}
-
-        action = InventoryAction(
-            buy_quantities=buy,
-            delivery_method=delivery,
-            liquidate=liquidate,
-        )
-        obs = env.step(action)
-
-    return obs.total_profit
+    return total_profit
 
 
 def compute_baselines(task_name):
