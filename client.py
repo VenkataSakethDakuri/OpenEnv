@@ -25,6 +25,9 @@ class InventoryEnv(EnvClient[InventoryAction, InventoryObservation, InventorySta
         if action.liquidate is not None:
             payload["liquidate"] = action.liquidate
 
+        if action.price_multipliers is not None:
+            payload["price_multipliers"] = action.price_multipliers
+
         return payload
 
 
@@ -40,6 +43,7 @@ class InventoryEnv(EnvClient[InventoryAction, InventoryObservation, InventorySta
             total_profit = obs_data.get("total_profit", 0),
             demand_today = obs_data.get("demand_today", {}),
             updated_inventory = obs_data.get("updated_inventory", {}),
+            remaining_capacity = obs_data.get("remaining_capacity", {}),
             updated_events = obs_data.get("updated_events", {}),
             updated_deliveries = obs_data.get("updated_deliveries", []),
             done = obs_data.get("done", False),

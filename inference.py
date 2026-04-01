@@ -58,17 +58,26 @@ SYSTEM_PROMPT = textwrap.dedent("""
     - When no events are approaching, slow shipping is often sufficient and saves significant cost.
     - Near end of episode (last 2 days), stop buying — focus on selling remaining stock.
 
+    DYNAMIC PRICING:
+    You can set a price multiplier (0.5 to 1.5) per product each day. Default is 1.0.
+    - Lower price (e.g. 0.7) = more demand but less revenue per unit. Good for clearing excess stock.
+    - Higher price (e.g. 1.3) = less demand but more revenue per unit. Good when stock is low.
+    - Price elasticity varies: groceries are inelastic (people buy regardless), clothing/toys are elastic (demand drops fast with price hikes).
+    - Elasticity values: electronics=1.2, clothing=1.5, groceries=0.4, furniture=0.8, toys=1.3
+
     Each day you must respond with a JSON action:
     {
         "buy_quantities": {"product_name": quantity, ...},
         "delivery_method": "slow" | "medium" | "fast",
-        "liquidate": {"product_name": quantity, ...}
+        "liquidate": {"product_name": quantity, ...},
+        "price_multipliers": {"product_name": multiplier, ...}
     }
 
     - buy_quantities: products and amounts to order.
     - delivery_method: shipping speed for this order
     - liquidate: products and amounts to dispose of (no revenue, empty {} to skip)
       Use liquidate to free up warehouse space before a restock.
+    - price_multipliers: set selling price multiplier per product (0.5-1.5, default 1.0 if omitted)
 
     LEARNING FROM HISTORY:
     - Compare your past buy quantities to the demand that followed — were you over or under?
@@ -182,6 +191,8 @@ def parse_action(response_text):
             clean["delivery_method"] = data["delivery_method"]
         if "liquidate" in data:
             clean["liquidate"] = data["liquidate"]
+        if "price_multipliers" in data:
+            clean["price_multipliers"] = data["price_multipliers"]
 
         return InventoryAction(**clean)
     except Exception as e:
@@ -192,6 +203,7 @@ def parse_action(response_text):
             delivery_method="slow",
             liquidate={},
         )
+        
 
 
 HISTORY_WINDOW = 15  # rolling window of past days to include in context
@@ -255,7 +267,7 @@ def run_task(client, task_name):
 
         action = parse_action(response_text)
 
-        print(f"Day {day}: buy={action.buy_quantities} delivery={action.delivery_method} liquidate={action.liquidate}")
+        print(f"Day {day}: buy={action.buy_quantities} delivery={action.delivery_method} liquidate={action.liquidate} prices={action.price_multipliers}")
 
         obs = env.step(action)
 

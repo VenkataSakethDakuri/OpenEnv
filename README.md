@@ -39,7 +39,7 @@ class InventoryAction(Action):
 | Field | Description |
 |-------|-------------|
 | `buy_quantities` | Products and amounts to order. Empty `{}` to skip buying. |
-| `delivery_method` | `"slow"` ($2/unit, 5 days), `"medium"` ($5/unit, 3 days), `"fast"` ($10/unit, 1 day) |
+| `delivery_method | "slow" ($2/unit, 3-7 days), "medium" ($5/unit, 2-4 days), "fast" ($10/unit, 1 day guaranteed) |
 | `liquidate` | Products and amounts to dispose of (no revenue). Use for expiring groceries or freeing warehouse space. |
 
 ## Observation Space

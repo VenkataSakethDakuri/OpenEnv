@@ -176,3 +176,11 @@ TASKS = {
         },
     },
 }
+
+PRICE_ELASTICITY = {
+    "electronics": 1.2,
+    "clothing":    1.5,
+    "groceries":   0.4,
+    "furniture":   0.8,
+    "toys":        1.3,
+}

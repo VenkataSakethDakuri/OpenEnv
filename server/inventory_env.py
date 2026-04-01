@@ -8,7 +8,7 @@ from .constants import (
     INITIAL_CASH, BASE_PRICES, COST_PRICES, SHELF_LIFE, INITIAL_STOCK,
     EVENTS, SHIPPING_COST, SHIPPING_DAYS, INVENTORY_CAPACITY,
     EXTRA_INVENTORY_COST, BASE_DEMAND, WEEKEND_MULTIPLIER, EVENT_EFFECTS,
-    EVENT_DURATION, MAX_DAYS, UPGRADE_DELIVERY_COST, TASKS,
+    EVENT_DURATION, MAX_DAYS, UPGRADE_DELIVERY_COST, TASKS, PRICE_ELASTICITY
 )
 
 
@@ -141,23 +141,32 @@ class InventoryEnvironment(Environment):
         # 5. generate demand
         demand = self._generate_demand()
 
+        # apply price elasticity: demand scales with price^(-elasticity)
+        price_mults = {}
+        for product in demand:
+            pm = max(0.5, min(1.5, action.price_multipliers.get(product, 1.0)))
+            price_mults[product] = pm
+            e = PRICE_ELASTICITY[product]
+            demand[product] = max(0, int(demand[product] * pm ** -e))
+
         # 6. sell products (fifo)
         for product, demand_today in demand.items():
 
+            sell_price = BASE_PRICES[product] * price_mults[product]
             product_availability = sum(batch[0] for batch in self.inventory[product])
 
 
             if demand_today > product_availability:
                 missed_sales = demand_today - product_availability
                 sold = product_availability
-                day_revenue += sold * BASE_PRICES[product]
+                day_revenue += sold * sell_price
                 self.inventory[product] = []
-                self.reward -= missed_sales * BASE_PRICES[product] * 0.001
-                self.reward += sold * BASE_PRICES[product] * 0.001
+                self.reward -= missed_sales * sell_price * 0.001
+                self.reward += sold * sell_price * 0.001
 
             else:
-                day_revenue += demand_today * BASE_PRICES[product]
-                self.reward += demand_today * BASE_PRICES[product] * 0.001
+                day_revenue += demand_today * sell_price
+                self.reward += demand_today * sell_price * 0.001
 
                 new_batches = []
 

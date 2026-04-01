@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import json
 from openenv.core.env_server import Action, Observation, State
 from typing import Literal, Dict, List, Optional
-
 from pydantic import field_validator
+
 
 class InventoryAction(Action):
     buy_quantities : Dict[str, int] = {}
     delivery_method : Literal["slow", "medium", "fast"] = "slow"
     liquidate : Dict[str, int] = {}
+    price_multipliers : Dict[str, float] = {}  # product -> 0.5 to 1.5 (default 1.0)
 
-    @field_validator("buy_quantities", "liquidate", mode="before")
+    @field_validator("buy_quantities", "liquidate", "price_multipliers", mode="before")
     @classmethod
     def parse_dict_strings(cls, v):
         if isinstance(v, str):
