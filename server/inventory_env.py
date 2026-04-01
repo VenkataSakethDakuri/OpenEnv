@@ -128,6 +128,14 @@ class InventoryEnvironment(Environment):
             day_cost += total_cost
 
             arrival_day = self.current_day + SHIPPING_DAYS[action.delivery_method]
+            # add jitter: slow ±2 days, medium ±1 day, fast is reliable
+            jitter_rng = random.Random(self.seed * 2000 + self.current_day * 100 + hash(product))
+            if action.delivery_method == "slow":
+                arrival_day += jitter_rng.randint(-2, 2)
+            elif action.delivery_method == "medium":
+                arrival_day += jitter_rng.randint(-1, 1)
+            # ensure arrival is at least next day
+            arrival_day = max(self.current_day + 1, arrival_day)
             self.deliveries.append({product: [qty, arrival_day]})
 
         # 5. generate demand
