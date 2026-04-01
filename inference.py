@@ -25,7 +25,7 @@ from server.constants import EXTRA_INVENTORY_COST, EVENT_DURATION
 from models import InventoryAction
 
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN") 
+API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN")
 MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_DAYS = 30
 
@@ -42,7 +42,7 @@ SYSTEM_PROMPT = textwrap.dedent("""
     Product selling prices: electronics=$150, clothing=$40, groceries=$10, furniture=$200, toys=$25
     Product cost prices: electronics=$100, clothing=$25, groceries=$5, furniture=$130, toys=$12
     Profit margins: electronics=$50, clothing=$15, groceries=$5, furniture=$70, toys=$13
-    Shipping costs per unit: slow=$2 (5 days), medium=$5 (3 days), fast=$10 (1 day)
+    Shipping costs per unit: slow=$2 (3-7 days), medium=$5 (2-4 days), fast=$10 (1 day, always reliable)
     Warehouse capacity: electronics=100, clothing=200, groceries=500, furniture=50, toys=300
 
     Events (like black_friday, christmas) boost demand when their countdown hits 0 and last for 2 days.
@@ -54,7 +54,7 @@ SYSTEM_PROMPT = textwrap.dedent("""
     - You MUST restock products when inventory is low. Missed sales = lost revenue = negative reward.
     - Do NOT overbuy when demand is low — unsold stock ties up cash and perishables expire.
     - Prioritize high-margin products: furniture ($70 profit), electronics ($50 profit).
-    - Stock up BEFORE events hit (check event countdowns — order 3-5 days ahead using slow/medium shipping).
+    - Stock up BEFORE events hit (check event countdowns — order 3-5 days ahead).
     - When no events are approaching, slow shipping is often sufficient and saves significant cost.
     - Near end of episode (last 2 days), stop buying — focus on selling remaining stock.
 
@@ -297,4 +297,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
