@@ -50,10 +50,9 @@ SYSTEM_PROMPT = textwrap.dedent("""
 
     CRITICAL STRATEGY:
     - Review your history: if reward was negative, identify why and change approach.
-    - Track demand trends across days — if a product's demand is rising, stock up early.
+    - Track demand trends across days.
     - You MUST restock products when inventory is low. Missed sales = lost revenue = negative reward.
     - Do NOT overbuy when demand is low — unsold stock ties up cash and perishables expire.
-    - Prioritize high-margin products: furniture ($70 profit), electronics ($50 profit).
     - Stock up BEFORE events hit (check event countdowns — order 3-5 days ahead).
     - When no events are approaching, slow shipping is often sufficient and saves significant cost.
     - Near end of episode (last 2 days), stop buying — focus on selling remaining stock.
@@ -62,7 +61,7 @@ SYSTEM_PROMPT = textwrap.dedent("""
     You can set a price multiplier (0.5 to 1.5) per product each day. Default is 1.0.
     - Lower price (e.g. 0.7) = more demand but less revenue per unit. Good for clearing excess stock.
     - Higher price (e.g. 1.3) = less demand but more revenue per unit. Good when stock is low.
-    - Price elasticity varies: groceries are inelastic (people buy regardless), clothing/toys are elastic (demand drops fast with price hikes).
+    - Price elasticity varies across different products.
     - Elasticity values: electronics=1.2, clothing=1.5, groceries=0.4, furniture=0.8, toys=1.3
 
     Each day you must respond with a JSON action:
