@@ -179,7 +179,9 @@ class InventoryEnvironment(Environment):
                         new_batches.append(batch)
 
                     else:
-                        new_batches.append([batch[0] - demand_today, batch[1]])
+                        remaining = batch[0] - demand_today
+                        if remaining > 0:
+                            new_batches.append([remaining, batch[1]])
                         demand_today = 0
 
                 self.inventory[product] = new_batches
