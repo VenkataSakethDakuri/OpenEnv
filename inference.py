@@ -201,11 +201,12 @@ def parse_action(response_text):
             buy_quantities={},
             delivery_method="slow",
             liquidate={},
+            price_multipliers={},
         )
         
 
 
-HISTORY_WINDOW = 15  # rolling window of past days to include in context
+HISTORY_WINDOW = 7  # rolling window of past days to include in context
 
 
 def run_task(client, task_name):
