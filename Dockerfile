@@ -1,5 +1,7 @@
 FROM ghcr.io/meta-pytorch/openenv-base:latest AS builder
 
+ENV ENABLE_WEB_INTERFACE=true
+
 RUN apt-get update && apt-get install -y git curl && \
     curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
