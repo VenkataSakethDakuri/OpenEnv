@@ -214,66 +214,83 @@ def run_task(client, task_name):
     env = InventoryEnvironment(task_name)
     obs = env.reset()
 
-    print(f"\n{'=' * 50}")
-    print(f"Task: {task_name.upper()} | Cash: ${obs.total_cash:.2f} | Days: {env.max_days}")
-    print(f"{'=' * 50}")
+    rewards = []
+    steps_taken = 0
+    success = False
+
+    print(f"[START] task={task_name} env=inventory_env model={MODEL_NAME}", flush=True)
 
     # Rolling history of (user_observation, assistant_response) pairs
     history = []
 
-    for day in range(1, env.max_days + 1):
-        if obs.done:
-            print("Episode ended early.")
-            break
+    try:
+        for day in range(1, env.max_days + 1):
+            if obs.done:
+                break
 
-        user_prompt = format_observation(obs)
+            user_prompt = format_observation(obs)
 
-        # Build messages: system + history context + current observation
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            # Build messages: system + history context + current observation
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        recent = history[-HISTORY_WINDOW:]
-        if recent:
-            # Tell the LLM it's about to see its past decisions and their outcomes
-            messages.append({
-                "role": "user",
-                "content": f"Here is your decision history from the last {len(recent)} day(s). "
-                           "Use this to identify demand trends, adjust restocking, and avoid repeating mistakes.",
-            })
-            messages.append({
-                "role": "assistant",
-                "content": "Understood. I'll review my past decisions and their outcomes to make better choices today.",
-            })
-            for past_user, past_assistant in recent:
-                messages.append({"role": "user", "content": past_user})
-                messages.append({"role": "assistant", "content": past_assistant})
+            recent = history[-HISTORY_WINDOW:]
+            if recent:
+                messages.append({
+                    "role": "user",
+                    "content": f"Here is your decision history from the last {len(recent)} day(s). "
+                               "Use this to identify demand trends, adjust restocking, and avoid repeating mistakes.",
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": "Understood. I'll review my past decisions and their outcomes to make better choices today.",
+                })
+                for past_user, past_assistant in recent:
+                    messages.append({"role": "user", "content": past_user})
+                    messages.append({"role": "assistant", "content": past_assistant})
 
-        messages.append({"role": "user", "content": user_prompt})
+            messages.append({"role": "user", "content": user_prompt})
 
-        try:
-            completion = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                temperature=0.0,
-                max_completion_tokens=500,
-                stream=False,
-            )
-            response_text = completion.choices[0].message.content or ""
-        except Exception as exc:
-            print(f"  LLM request failed: {exc}. Skipping turn.")
-            response_text = "{}"
+            error = None
+            try:
+                completion = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=messages,
+                    temperature=0.0,
+                    max_completion_tokens=500,
+                    stream=False,
+                )
+                response_text = completion.choices[0].message.content or ""
+            except Exception as exc:
+                error = str(exc)
+                response_text = "{}"
 
-        # Save this turn to rolling history
-        history.append((user_prompt, response_text))
+            # Save this turn to rolling history
+            history.append((user_prompt, response_text))
 
-        action = parse_action(response_text)
+            action = parse_action(response_text)
+            action_str = json.dumps({"buy": action.buy_quantities, "deliver": action.delivery_method, "liquidate": action.liquidate, "prices": action.price_multipliers})
 
-        print(f"Day {day}: buy={action.buy_quantities} delivery={action.delivery_method} liquidate={action.liquidate} prices={action.price_multipliers}")
+            obs = env.step(action)
 
-        obs = env.step(action)
+            reward = obs.reward
+            done = obs.done
+            rewards.append(reward)
+            steps_taken = day
 
-        print(f"  Cash: ${obs.total_cash:.2f} | Day Profit: ${obs.day_profit:.2f} | Reward: {obs.reward:.3f}")
+            print(f"[STEP] step={day} action={action_str} reward={reward:.2f} done={str(done).lower()} error={error if error else 'null'}", flush=True)
 
-    print(f"Task {task_name} complete | Total profit: ${obs.total_profit:.2f}")
+            if done:
+                break
+
+        # compute score
+        from server.grader import grade
+        score = grade(task_name, obs.total_profit)
+        success = score >= 0.1
+
+    finally:
+        rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+        print(f"[END] success={str(success).lower()} steps={steps_taken} score={score:.3f} rewards={rewards_str}", flush=True)
+
     return obs.total_profit
 
 
