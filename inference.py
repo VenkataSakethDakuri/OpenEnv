@@ -27,6 +27,7 @@ from models import InventoryAction
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen3-32B"
+TASK_NAME = os.getenv("TASK_NAME") or "easy"
 MAX_DAYS = 30
 
 SYSTEM_PROMPT = textwrap.dedent("""
@@ -202,8 +203,7 @@ def parse_action(response_text):
             delivery_method="slow",
             liquidate={},
             price_multipliers={},
-        )
-        
+        )        
 
 
 HISTORY_WINDOW = 7  # rolling window of past days to include in context
@@ -278,34 +278,26 @@ def run_task(client, task_name):
 
 
 def main():
-    from server.grader import grade_all, compute_baselines
+    from server.grader import grade, compute_baselines
 
     if not MODEL_NAME:
         raise RuntimeError("MODEL_NAME is not set. Please export MODEL_NAME before running inference.")
 
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    # print baselines first
+    # print baseline for selected task
+    floor, ceiling = compute_baselines(TASK_NAME)
     print(f"\n{'=' * 50}")
-    print("BASELINES")
+    print(f"BASELINE ({TASK_NAME}): floor=${floor:.2f} (passive) | ceiling=${ceiling:.2f} (heuristic)")
     print(f"{'=' * 50}")
-    for task_name in ["easy", "medium", "hard"]:
-        floor, ceiling = compute_baselines(task_name)
-        print(f"  {task_name}: floor=${floor:.2f} (passive) | ceiling=${ceiling:.2f} (heuristic)")
 
-    results = {}
-    for task_name in ["easy", "medium", "hard"]:
-        profit = run_task(client, task_name)
-        results[task_name] = profit
-
-    scores = grade_all(results)
+    profit = run_task(client, TASK_NAME)
+    score = grade(TASK_NAME, profit)
 
     print(f"\n{'=' * 50}")
-    print("FINAL SCORES")
+    print("FINAL SCORE")
     print(f"{'=' * 50}")
-    for task_name, score in scores.items():
-        floor, ceiling = compute_baselines(task_name)
-        print(f"  {task_name}: {score:.3f} (profit: ${results[task_name]:.2f} | floor: ${floor:.2f} | ceiling: ${ceiling:.2f})")
+    print(f"  {TASK_NAME}: {score:.3f} (profit: ${profit:.2f} | floor: ${floor:.2f} | ceiling: ${ceiling:.2f})")
 
 
 if __name__ == "__main__":
