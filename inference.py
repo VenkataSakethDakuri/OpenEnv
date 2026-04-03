@@ -25,8 +25,8 @@ from server.constants import EXTRA_INVENTORY_COST, EVENT_DURATION
 from models import InventoryAction
 
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN")
-MODEL_NAME = os.getenv("MODEL_NAME")
+API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
+MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen3-32B"
 MAX_DAYS = 30
 
 SYSTEM_PROMPT = textwrap.dedent("""
@@ -254,7 +254,7 @@ def run_task(client, task_name):
                 model=MODEL_NAME,
                 messages=messages,
                 temperature=0.0,
-                max_completion_tokens=300,
+                max_completion_tokens=500,
                 stream=False,
             )
             response_text = completion.choices[0].message.content or ""
