@@ -182,6 +182,34 @@ docker build -t inventory-env .
 docker run -p 8000:8000 inventory-env
 ```
 
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check — returns 200 if server is running |
+| `/reset` | POST | Reset environment, returns initial observation |
+| `/step` | POST | Submit an action (JSON body), returns next observation with reward |
+| `/state` | GET | Get current episode state (day, cash, inventory) |
+| `/tasks` | GET | List all 3 tasks with full config (stock, capacity, demand ranges, events) |
+| `/grader` | POST | Score an episode given task name and agent profit |
+| `/baseline` | GET | Run LLM inference on a task and return the score |
+
+### Example Queries
+
+```bash
+# List all tasks with full schemas
+curl http://localhost:8000/tasks
+
+# Grade a specific profit
+curl -X POST "http://localhost:8000/grader?task_name=easy&agent_profit=5000"
+# → {"task_name":"easy","agent_profit":5000.0,"floor":2200.0,"ceiling":10011.0,"score":0.358}
+
+# Run baseline inference (requires API keys in container env)
+curl "http://localhost:8000/baseline"
+curl "http://localhost:8000/baseline?task_name=hard"
+# → {"task_name":"easy","score":0.822}
+```
+
 ## Step Execution Order
 
 Each `step()` call processes in this order:
