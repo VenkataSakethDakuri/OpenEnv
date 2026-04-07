@@ -21,7 +21,7 @@ load_dotenv()
 from openai import OpenAI
 
 from server.inventory_env import InventoryEnvironment
-from server.constants import EXTRA_INVENTORY_COST, EVENT_DURATION
+from server.constants import EXTRA_INVENTORY_COST, EVENT_DURATION, TASKS, COST_PRICES, SHIPPING_COST, BASE_PRICES
 from models import InventoryAction
 
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
@@ -302,19 +302,28 @@ def main():
 
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    # print baseline for selected task
-    floor, ceiling = compute_baselines(TASK_NAME)
-    print(f"\n{'=' * 50}")
-    print(f"BASELINE ({TASK_NAME}): floor=${floor:.2f} (passive) | ceiling=${ceiling:.2f} (heuristic)")
-    print(f"{'=' * 50}")
+    tasks = ["easy", "medium", "hard"]
 
-    profit = run_task(client, TASK_NAME)
-    score = grade(TASK_NAME, profit)
+    # print baselines
+    print(f"\n{'=' * 50}")
+    print("BASELINES")
+    print(f"{'=' * 50}")
+    for task_name in tasks:
+        floor, ceiling = compute_baselines(task_name)
+        print(f"  {task_name}: floor=${floor:.2f} (passive) | ceiling=${ceiling:.2f} (heuristic)")
+
+    results = {}
+    for task_name in tasks:
+        profit = run_task(client, task_name)
+        results[task_name] = profit
 
     print(f"\n{'=' * 50}")
-    print("FINAL SCORE")
+    print("FINAL SCORES")
     print(f"{'=' * 50}")
-    print(f"  {TASK_NAME}: {score:.3f} (profit: ${profit:.2f} | floor: ${floor:.2f} | ceiling: ${ceiling:.2f})")
+    for task_name in tasks:
+        floor, ceiling = compute_baselines(task_name)
+        score = grade(task_name, results[task_name])
+        print(f"  {task_name}: {score:.3f} (profit: ${results[task_name]:.2f} | floor: ${floor:.2f} | ceiling: ${ceiling:.2f})")
 
 
 if __name__ == "__main__":
