@@ -98,7 +98,7 @@ def grade(task_name, agent_profit):
         return 1.0 if agent_profit >= ceiling else 0.0
 
     score = (agent_profit - floor) / (ceiling - floor)
-    return max(0.0, min(1.0, score))
+    return max(0.002, min(0.998, score))
 
 
 def grade_all(results):
