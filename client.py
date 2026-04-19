@@ -34,6 +34,8 @@ class InventoryEnv(EnvClient[InventoryAction, InventoryObservation, InventorySta
     def _parse_result(self, payload: Dict) -> StepResult[InventoryObservation]:
 
         obs_data = payload.get("observation", {})
+        reward = payload.get("reward")
+        done = payload.get("done", False)
 
         observation = InventoryObservation(
 
@@ -46,15 +48,14 @@ class InventoryEnv(EnvClient[InventoryAction, InventoryObservation, InventorySta
             remaining_capacity = obs_data.get("remaining_capacity", {}),
             updated_events = obs_data.get("updated_events", {}),
             updated_deliveries = obs_data.get("updated_deliveries", []),
-            done = obs_data.get("done", False),
-            reward = obs_data.get("reward", 0.0),
-            metadata=obs_data.get("metadata", {}),
+            done = done,
+            reward = reward,
         )
 
         return StepResult(
             observation = observation,
-            reward = observation.reward,
-            done = observation.done,
+            reward = reward,
+            done = done,
         )
 
 

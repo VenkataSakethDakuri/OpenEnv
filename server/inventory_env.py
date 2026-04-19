@@ -24,6 +24,7 @@ def _build_inventory(stock):
 class InventoryEnvironment(Environment):
 
     def __init__(self, task_name="medium"):
+        super().__init__()
         self.task_name = task_name
         self.task = TASKS[task_name]
         self.cash = self.task["initial_cash"]
@@ -37,6 +38,7 @@ class InventoryEnvironment(Environment):
         self.max_days = self.task["max_days"]
         self.inventory_capacity = self.task["inventory_capacity"]
         self.base_demand = self.task["base_demand"]
+        self.consecutive_idle_days = 0
         self.reset()
 
     def reset(self, seed: int = None) -> InventoryObservation:
@@ -51,6 +53,7 @@ class InventoryEnvironment(Environment):
         self.current_day = 0
         self.total_profit = 0.0
         self.reward = 0.0
+        self.consecutive_idle_days = 0
 
         self._state = InventoryState(
             episode_id = str(uuid4()),
@@ -83,6 +86,8 @@ class InventoryEnvironment(Environment):
         for event_name in self.events:
             self.events[event_name] -= 1
 
+        total_inventory = sum(sum(batch[0] for batch in self.inventory[product]) for product in self.inventory)
+
         # 2. remove expired groceries
         new_batches = []
         expired_groceries_count = 0
@@ -96,20 +101,23 @@ class InventoryEnvironment(Environment):
 
         self.inventory["groceries"] = new_batches
 
-        self.reward -= 0.05 * expired_groceries_count
+        # self.reward -= 0.05 * expired_groceries_count
 
         # 3. Handle incoming deliveries
         remaining_deliveries = []
+        total_delivered_units = 0
         for delivery in self.deliveries:
             for product, shipment in delivery.items():
                 qty, arrival_day = shipment
                 if arrival_day <= self.current_day:
+                    total_delivered_units += qty
                     self.inventory[product].append([qty, SHELF_LIFE[product]])
                 else:
                     remaining_deliveries.append(delivery)
         self.deliveries = remaining_deliveries
 
         # 4. process purchases
+        had_unaffordable_order = False
         for product, qty in action.buy_quantities.items():
             unit_cost = COST_PRICES[product] + SHIPPING_COST[action.delivery_method]
             total_cost = qty * unit_cost
@@ -121,7 +129,8 @@ class InventoryEnvironment(Environment):
             total_cost += extra_cost
 
             if total_cost > self.cash:
-                self.reward -= 0.5  # penalize for ordering what you can't afford
+                had_unaffordable_order = True
+                # self.reward -= 0.5
                 continue
 
             self.cash -= total_cost
@@ -150,23 +159,30 @@ class InventoryEnvironment(Environment):
             demand[product] = max(0, int(demand[product] * pm ** -e))
 
         # 6. sell products (fifo)
+        max_daily_revenue = 0.0
+        total_demand_units = 0
+        total_sold_units = 0
         for product, demand_today in demand.items():
 
             sell_price = BASE_PRICES[product] * price_mults[product]
+            max_daily_revenue += demand_today * sell_price
             product_availability = sum(batch[0] for batch in self.inventory[product])
+            total_demand_units += demand_today
 
 
             if demand_today > product_availability:
                 missed_sales = demand_today - product_availability
                 sold = product_availability
+                total_sold_units += sold
                 day_revenue += sold * sell_price
                 self.inventory[product] = []
-                self.reward -= missed_sales * sell_price * 0.001
-                self.reward += sold * sell_price * 0.001
+                # self.reward -= missed_sales * sell_price * 0.001
+                # self.reward += sold * sell_price * 0.001
 
             else:
+                total_sold_units += demand_today
                 day_revenue += demand_today * sell_price
-                self.reward += demand_today * sell_price * 0.001
+                # self.reward += demand_today * sell_price * 0.001
 
                 new_batches = []
 
@@ -188,10 +204,12 @@ class InventoryEnvironment(Environment):
 
         # 7. Liquidate some stock (FIFO, no revenue)
         total_liquidation_loss = 0.0
+        total_liquidated_units = 0
         for product, count in action.liquidate.items():
             if product not in self.inventory or count <= 0:
                 continue
             actually_removed = min(count, sum(b[0] for b in self.inventory[product]))
+            total_liquidated_units += actually_removed
             total_liquidation_loss += actually_removed * COST_PRICES[product]
             remaining = count
             new_batches = []
@@ -205,7 +223,7 @@ class InventoryEnvironment(Environment):
                     remaining = 0
             self.inventory[product] = new_batches
 
-        self.reward -= total_liquidation_loss * 0.001
+        # self.reward -= total_liquidation_loss * 0.001
 
         # compute day profit
         day_profit = day_revenue - day_cost
@@ -223,6 +241,86 @@ class InventoryEnvironment(Environment):
             inventory = {p: sum(b[0] for b in self.inventory[p]) for p in self.inventory},
         )
 
+        if day_profit < 0:
+            R_profit_bool = -0.5
+        elif day_profit == 0:
+            R_profit_bool = 0.0 
+        else:
+            R_profit_bool = 1.0
+
+
+
+
+        total_managed = total_inventory + total_delivered_units
+        wasted_units = expired_groceries_count + total_liquidated_units
+        waste_rate = wasted_units / max(total_managed, 1)
+        R_waste = max(-1.0, 1.0 - 2.0 * min(waste_rate * 3, 1.0))
+
+        # R_revenue: fraction of today's possible revenue captured
+        R_revenue = max(-1.0, min(1.0, (2 * day_revenue / max(max_daily_revenue, 1.0) - 1.0)))
+
+        # R_cash_health: sustainable cash position?
+        cash_ratio = self.cash / self.task["initial_cash"]
+        R_cash_health = max(-1.0, min(1.0, cash_ratio - 0.3))
+
+        # R_capacity_util: warehouse utilization across all products
+        # 0% util → -1.0, 50% → 0.0, 100% → +1.0
+        utilizations = []
+        for p in self.inventory:
+            stock = sum(b[0] for b in self.inventory[p])
+            utilizations.append(stock / self.inventory_capacity[p])
+        avg_util = sum(utilizations) / len(utilizations)
+        R_capacity_util = max(-1.0, min(1.0, 2.0 * avg_util - 1.0))
+
+        # R_fulfillment: fraction of demand met (unit-based), mapped to [-1, +1]
+        R_fulfillment = 2.0 * (total_sold_units / max(total_demand_units, 1)) - 1.0
+
+        # Hard-fail: invalid action (negative quantities, invalid products, or liquidating more than available)
+        invalid_action = False
+        for p, qty in action.buy_quantities.items():
+            if qty < 0 or p not in BASE_PRICES:
+                invalid_action = True
+                break
+        for p, qty in action.liquidate.items():
+            if qty < 0 or p not in BASE_PRICES:
+                invalid_action = True
+                break
+            available = sum(b[0] for b in self.inventory.get(p, []))
+            if qty > available:
+                invalid_action = True
+                break
+
+        # Hard-fail: cash below $10
+        bankrupt = self.cash < 10.0
+
+        # Hard-fail: do-nothing for 3+ consecutive days
+        is_idle = (not action.buy_quantities or all(v == 0 for v in action.buy_quantities.values())) and \
+                  (not action.liquidate or all(v == 0 for v in action.liquidate.values()))
+        if is_idle:
+            self.consecutive_idle_days += 1
+        else:
+            self.consecutive_idle_days = 0
+        idle_penalty = self.consecutive_idle_days >= 3
+
+        # Apply hard-fail gates — independent, all stack on top of weighted reward
+        hard_fail_penalty = 0.0
+        if invalid_action:
+            hard_fail_penalty -= 1.0
+        if had_unaffordable_order:
+            hard_fail_penalty -= 1.0
+        if bankrupt:
+            hard_fail_penalty -= 1.0
+        if idle_penalty:
+            hard_fail_penalty -= 1.0
+
+        self.reward = (0.25 * R_revenue
+                     + 0.20 * R_fulfillment
+                     + 0.15 * R_waste
+                     + 0.15 * R_cash_health
+                     + 0.15 * R_capacity_util
+                     + 0.10 * R_profit_bool
+                     + hard_fail_penalty)
+
         return InventoryObservation(
             current_day = self.current_day,
             total_cash = self.cash,
@@ -234,6 +332,22 @@ class InventoryEnvironment(Environment):
             updated_events = copy.deepcopy(self.events),
             updated_deliveries = copy.deepcopy(self.deliveries),
             reward = self.reward,
+            metadata = {
+                "reward_breakdown": {
+                    "R_profit_bool": R_profit_bool,
+                    "R_revenue": R_revenue,
+                    "R_fulfillment": R_fulfillment,
+                    "R_waste": R_waste,
+                    "R_cash_health": R_cash_health,
+                    "R_capacity_util": R_capacity_util,
+                },
+                "hard_fails": {
+                    "invalid_action": invalid_action,
+                    "unaffordable_order": had_unaffordable_order,
+                    "bankrupt": bankrupt,
+                    "idle_penalty": idle_penalty,
+                },
+            },
             done = done,
         )
 

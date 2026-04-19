@@ -50,7 +50,6 @@ SYSTEM_PROMPT = textwrap.dedent("""
     Weekends (day%7 == 5 or 6) have 1.2x demand.
 
     CRITICAL STRATEGY:
-    - Review your history: if reward was negative, identify why and change approach.
     - Track demand trends across days.
     - You MUST restock products when inventory is low. Missed sales = lost revenue = negative reward.
     - Do NOT overbuy when demand is low — unsold stock ties up cash and perishables expire.
@@ -83,7 +82,27 @@ SYSTEM_PROMPT = textwrap.dedent("""
     - Compare your past buy quantities to the demand that followed — were you over or under?
     - If you see repeated stockouts for a product, increase orders for it.
     - If groceries expired, you overbought — reduce grocery orders or use faster shipping.
-    - A negative reward means your last action was bad — adjust immediately.
+
+    REWARD SIGNALS (shown each day as "Reward Breakdown"):
+    - R_revenue (25%): how much of today's possible revenue you captured. Low = stockouts, high = good stock.
+    - R_fulfillment (20%): fraction of demand met (unit-based). Low = you're missing sales across products.
+    - R_waste (15%): penalizes expired groceries and liquidated stock. Keep groceries fresh, avoid over-ordering.
+    - R_cash_health (15%): positive if cash > 30% of starting capital. Don't overspend.
+    - R_capacity_util (15%): higher warehouse utilization is better. Empty warehouse = missed opportunity.
+    - R_profit_bool (10%): +1.0 if day was profitable, -0.5 if not. Aim for positive profit every day.
+
+    HARD FAILS (stack as -1.0 penalty each on top of reward):
+    - Ordering more than you can afford
+    - Cash dropping below $10 (bankrupt)
+    - Doing nothing for 3+ consecutive days
+    - Sending invalid quantities or product names
+    - Trying to liquidate more stock than you actually have
+
+    Use the reward breakdown to diagnose problems:
+    - Low R_revenue + low R_fulfillment → restock urgently
+    - Low R_waste → too many groceries expiring, order less or sell faster (lower price)
+    - Low R_cash_health → spending too much, use slow shipping or order less
+    - Low R_capacity_util → warehouse too empty, place orders
 
     Before responding with JSON, briefly reason (2-3 lines max):
     1. What did I learn from recent history? What went wrong/right?
@@ -92,6 +111,26 @@ SYSTEM_PROMPT = textwrap.dedent("""
 
     Then output ONLY the final JSON action on the last line.
 """).strip()
+
+
+def _format_reward_breakdown(obs):
+    """Format reward metadata into readable text for the LLM."""
+    meta = getattr(obs, 'metadata', None) or {}
+    breakdown = meta.get("reward_breakdown", {})
+    hard_fails = meta.get("hard_fails", {})
+
+    if not breakdown:
+        return "\n  No breakdown available (day 0)"
+
+    lines = []
+    for signal, value in breakdown.items():
+        lines.append(f"  {signal}: {value:.2f}")
+
+    triggered = [k for k, v in hard_fails.items() if v]
+    if triggered:
+        lines.append(f"  HARD FAILS: {', '.join(triggered)}")
+
+    return "\n" + "\n".join(lines)
 
 
 def format_observation(obs):
@@ -141,6 +180,8 @@ Cash: ${obs.total_cash:.2f}
 Day Profit: ${obs.day_profit:.2f}
 Total Profit: ${obs.total_profit:.2f}
 Last Step Reward: {obs.reward:.3f}
+
+Reward Breakdown:{_format_reward_breakdown(obs)}
 
 Inventory:
 {inv_text}
@@ -216,6 +257,7 @@ def run_task(client, task_name):
 
     rewards = []
     steps_taken = 0
+    score = 0.0
     success = False
 
     print(f"[START] task={task_name} env=inventory_env model={MODEL_NAME}", flush=True)
