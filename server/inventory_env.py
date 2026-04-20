@@ -5,15 +5,14 @@ from uuid import uuid4
 
 from models import InventoryAction, InventoryObservation, InventoryState
 from .constants import (
-    INITIAL_CASH, BASE_PRICES, COST_PRICES, SHELF_LIFE, INITIAL_STOCK,
-    EVENTS, SHIPPING_COST, SHIPPING_DAYS, INVENTORY_CAPACITY,
-    EXTRA_INVENTORY_COST, BASE_DEMAND, WEEKEND_MULTIPLIER, EVENT_EFFECTS,
-    EVENT_DURATION, MAX_DAYS, UPGRADE_DELIVERY_COST, TASKS, PRICE_ELASTICITY
+    BASE_PRICES, COST_PRICES, SHELF_LIFE, SHIPPING_COST, SHIPPING_DAYS,
+    EXTRA_INVENTORY_COST, WEEKEND_MULTIPLIER,
+    EVENT_EFFECTS, EVENT_DURATION, PRICE_ELASTICITY, TASKS,
 )
+from .directives import DirectiveEngine
 
 
 def _build_inventory(stock):
-    """Convert stock dict to batch format: {product: [[qty, days_left], ...]}"""
     inv = {}
     for product, qty in stock.items():
         shelf = SHELF_LIFE[product]
@@ -27,25 +26,10 @@ class InventoryEnvironment(Environment):
         super().__init__()
         self.task_name = task_name
         self.task = TASKS[task_name]
-        self.cash = self.task["initial_cash"]
-        self.inventory = _build_inventory(self.task["initial_stock"])
-        self.events = copy.deepcopy(self.task["events"])
-        self.deliveries = []
-        self.current_day = 0
-        self.total_profit = 0.0
-        self.seed = self.task["seed"]
-        self.reward = 0.0
-        self.max_days = self.task["max_days"]
-        self.inventory_capacity = self.task["inventory_capacity"]
-        self.base_demand = self.task["base_demand"]
-        self.consecutive_idle_days = 0
         self.reset()
 
-    def reset(self, seed: int = None) -> InventoryObservation:
-        if seed is not None:
-            self.seed = seed
-        else:
-            self.seed = self.task["seed"]
+    def reset(self, seed=None, episode_id=None, **kwargs) -> InventoryObservation:
+        self.seed = seed if seed is not None else self.task["seed"]
         self.cash = self.task["initial_cash"]
         self.inventory = _build_inventory(self.task["initial_stock"])
         self.events = copy.deepcopy(self.task["events"])
@@ -53,104 +37,148 @@ class InventoryEnvironment(Environment):
         self.current_day = 0
         self.total_profit = 0.0
         self.reward = 0.0
+        self.max_days = self.task["max_days"]
+        self.inventory_capacity = copy.deepcopy(self.task["inventory_capacity"])
+        self.base_demand = self.task["base_demand"]
         self.consecutive_idle_days = 0
 
+        # Long-horizon state
+        self.directive_engine = DirectiveEngine(self.task["directives"])
+        self.milestones_achieved = set()
+        self.agent_notes = ""
+        self.agent_weekly_plan = ""
+        self.weekly_spend = 0.0
+        self.weekly_waste = 0
+        self.week_start_day = 1
+        self.total_violations = 0
+        self.total_waste = 0
+        self.grocery_waste_streak = 0
+        self._prev_notes = ""
+
         self._state = InventoryState(
-            episode_id = str(uuid4()),
-            current_day = 0,
-            cash = self.task["initial_cash"],
-            inventory = dict(self.task["initial_stock"])
+            episode_id=str(uuid4()),
+            current_day=0,
+            total_days=self.max_days,
+            cash=self.cash,
+            total_profit=0.0,
+            inventory={p: sum(b[0] for b in self.inventory[p]) for p in self.inventory},
+            active_directives=0,
+            total_violations=0,
+            milestones_achieved=0,
+            milestones_total=len(self.task["milestones"]),
         )
 
         return InventoryObservation(
-            current_day = 0,
-            total_cash = self.cash,
-            day_profit = 0.0,
-            total_profit = 0.0,
-            demand_today = {},
-            updated_inventory = copy.deepcopy(self.inventory),
-            remaining_capacity = {p: max(0, self.inventory_capacity[p] - sum(b[0] for b in self.inventory[p])) for p in self.inventory},
-            updated_events = copy.deepcopy(self.events),
-            updated_deliveries = [],
-            reward = 0.0,
-            done = False,
+            current_day=0,
+            total_days=self.max_days,
+            total_cash=self.cash,
+            day_profit=0.0,
+            total_profit=0.0,
+            demand_today={},
+            updated_inventory=copy.deepcopy(self.inventory),
+            remaining_capacity={p: max(0, self.inventory_capacity[p] - sum(b[0] for b in self.inventory[p])) for p in self.inventory},
+            updated_events=copy.deepcopy(self.events),
+            updated_deliveries=[],
+            new_directives=[],
+            active_directive_ids=[],
+            directive_violations_last_step=[],
+            milestones=self._milestone_status(),
+            agent_notes="",
+            agent_weekly_plan="",
+            reward=0.0,
+            done=False,
         )
 
-    def step(self, action: InventoryAction) -> InventoryObservation:
+    def step(self, action: InventoryAction, timeout_s=None, **kwargs) -> InventoryObservation:
         self.current_day += 1
-        self.reward = 0.0  # reset reward each step
+        self.reward = 0.0
         day_cost = 0.0
         day_revenue = 0.0
 
-        # 1. tick event countdowns (keep ticking into negative to track active duration)
+        # Save agent memory
+        if action.notes_to_self:
+            self.agent_notes = action.notes_to_self
+        if action.weekly_plan is not None:
+            self.agent_weekly_plan = action.weekly_plan
+
+        # Weekly reset
+        if (self.current_day - self.week_start_day) >= 7:
+            self.weekly_spend = 0.0
+            self.weekly_waste = 0
+            self.week_start_day = self.current_day
+
+        # Issue directives
+        new_directives = self.directive_engine.advance_day(self.current_day)
+
+        # Tick events
         for event_name in self.events:
             self.events[event_name] -= 1
 
-        total_inventory = sum(sum(batch[0] for batch in self.inventory[product]) for product in self.inventory)
+        total_inventory = sum(sum(b[0] for b in self.inventory[p]) for p in self.inventory)
 
-        # 2. remove expired groceries
+        # Expire groceries
+        expired_count = 0
         new_batches = []
-        expired_groceries_count = 0
         for batch in self.inventory["groceries"]:
             if batch[1] == 0:
-                expired_groceries_count += batch[0]
-                continue
-
+                expired_count += batch[0]
             else:
                 new_batches.append([batch[0], batch[1] - 1])
-
         self.inventory["groceries"] = new_batches
+        self.total_waste += expired_count
+        self.weekly_waste += expired_count
+        if expired_count > 0:
+            self.grocery_waste_streak = 0
+        else:
+            self.grocery_waste_streak += 1
 
-        # self.reward -= 0.05 * expired_groceries_count
-
-        # 3. Handle incoming deliveries
+        # Handle deliveries
         remaining_deliveries = []
-        total_delivered_units = 0
+        total_delivered = 0
         for delivery in self.deliveries:
             for product, shipment in delivery.items():
                 qty, arrival_day = shipment
                 if arrival_day <= self.current_day:
-                    total_delivered_units += qty
+                    total_delivered += qty
                     self.inventory[product].append([qty, SHELF_LIFE[product]])
                 else:
                     remaining_deliveries.append(delivery)
         self.deliveries = remaining_deliveries
 
-        # 4. process purchases
-        had_unaffordable_order = False
+        # Process purchases
+        had_unaffordable = False
         for product, qty in action.buy_quantities.items():
-            unit_cost = COST_PRICES[product] + SHIPPING_COST[action.delivery_method]
-            total_cost = qty * unit_cost
-
-            # capacity overage cost
+            if qty <= 0 or product not in BASE_PRICES:
+                continue
+            method = action.delivery_methods.get(product, "slow")
+            unit_cost = COST_PRICES[product] + SHIPPING_COST[method]
             current_qty = sum(b[0] for b in self.inventory[product])
             overage = max(0, (current_qty + qty) - self.inventory_capacity[product])
             extra_cost = overage * EXTRA_INVENTORY_COST[product]
-            total_cost += extra_cost
+            total_cost = qty * unit_cost + extra_cost
 
             if total_cost > self.cash:
-                had_unaffordable_order = True
-                # self.reward -= 0.5
+                had_unaffordable = True
                 continue
 
             self.cash -= total_cost
             day_cost += total_cost
 
-            arrival_day = self.current_day + SHIPPING_DAYS[action.delivery_method]
-            # add jitter: slow ±2 days, medium ±1 day, fast is reliable
+            arrival_day = self.current_day + SHIPPING_DAYS[method]
             jitter_rng = random.Random(self.seed * 2000 + self.current_day * 100 + hash(product))
-            if action.delivery_method == "slow":
+            if method == "slow":
                 arrival_day += jitter_rng.randint(-2, 2)
-            elif action.delivery_method == "medium":
+            elif method == "medium":
                 arrival_day += jitter_rng.randint(-1, 1)
-            # ensure arrival is at least next day
             arrival_day = max(self.current_day + 1, arrival_day)
             self.deliveries.append({product: [qty, arrival_day]})
 
-        # 5. generate demand
+        self.weekly_spend += day_cost
+
+        # Generate demand
         demand = self._generate_demand()
 
-        # apply price elasticity: demand scales with price^(-elasticity)
+        # Price elasticity
         price_mults = {}
         for product in demand:
             pm = max(0.5, min(1.5, action.price_multipliers.get(product, 1.0)))
@@ -158,59 +186,44 @@ class InventoryEnvironment(Environment):
             e = PRICE_ELASTICITY[product]
             demand[product] = max(0, int(demand[product] * pm ** -e))
 
-        # 6. sell products (fifo)
+        # Sell (FIFO)
         max_daily_revenue = 0.0
         total_demand_units = 0
-        total_sold_units = 0
-        for product, demand_today in demand.items():
-
+        total_sold = 0
+        for product, demand_qty in demand.items():
             sell_price = BASE_PRICES[product] * price_mults[product]
-            max_daily_revenue += demand_today * sell_price
-            product_availability = sum(batch[0] for batch in self.inventory[product])
-            total_demand_units += demand_today
+            max_daily_revenue += demand_qty * sell_price
+            total_demand_units += demand_qty
+            available = sum(b[0] for b in self.inventory[product])
 
-
-            if demand_today > product_availability:
-                missed_sales = demand_today - product_availability
-                sold = product_availability
-                total_sold_units += sold
-                day_revenue += sold * sell_price
+            if demand_qty > available:
+                sold = available
                 self.inventory[product] = []
-                # self.reward -= missed_sales * sell_price * 0.001
-                # self.reward += sold * sell_price * 0.001
-
             else:
-                total_sold_units += demand_today
-                day_revenue += demand_today * sell_price
-                # self.reward += demand_today * sell_price * 0.001
-
+                sold = demand_qty
+                remaining = demand_qty
                 new_batches = []
-
                 for batch in self.inventory[product]:
-                    if batch[0] < demand_today:
-                        demand_today = demand_today - batch[0]
-
-
-                    elif demand_today == 0:
+                    if remaining <= 0:
                         new_batches.append(batch)
-
+                    elif batch[0] <= remaining:
+                        remaining -= batch[0]
                     else:
-                        remaining = batch[0] - demand_today
-                        if remaining > 0:
-                            new_batches.append([remaining, batch[1]])
-                        demand_today = 0
-
+                        new_batches.append([batch[0] - remaining, batch[1]])
+                        remaining = 0
                 self.inventory[product] = new_batches
 
-        # 7. Liquidate some stock (FIFO, no revenue)
-        total_liquidation_loss = 0.0
-        total_liquidated_units = 0
+            total_sold += sold
+            day_revenue += sold * sell_price
+
+        # Liquidate
+        liquidated_units = 0
         for product, count in action.liquidate.items():
             if product not in self.inventory or count <= 0:
                 continue
-            actually_removed = min(count, sum(b[0] for b in self.inventory[product]))
-            total_liquidated_units += actually_removed
-            total_liquidation_loss += actually_removed * COST_PRICES[product]
+            available = sum(b[0] for b in self.inventory[product])
+            actually_removed = min(count, available)
+            liquidated_units += actually_removed
             remaining = count
             new_batches = []
             for batch in self.inventory[product]:
@@ -223,148 +236,190 @@ class InventoryEnvironment(Environment):
                     remaining = 0
             self.inventory[product] = new_batches
 
-        # self.reward -= total_liquidation_loss * 0.001
+        self.total_waste += liquidated_units
+        self.weekly_waste += liquidated_units
 
-        # compute day profit
+        # Financials
         day_profit = day_revenue - day_cost
         self.cash += day_revenue
         self.total_profit += day_profit
-
-        # check done
         done = self.current_day >= self.max_days
 
-        # update state
-        self._state = InventoryState(
-            episode_id = self._state.episode_id,
-            current_day = self.current_day,
-            cash = self.cash,
-            inventory = {p: sum(b[0] for b in self.inventory[p]) for p in self.inventory},
-        )
+        # --- Directive compliance ---
+        env_state = {
+            "inventory": self.inventory,
+            "cash": self.cash,
+            "total_profit": self.total_profit,
+            "daily_spend": day_cost,
+            "weekly_spend": self.weekly_spend,
+            "weekly_waste": self.weekly_waste,
+        }
+        action_data = {
+            "buy_quantities": action.buy_quantities,
+            "delivery_methods": action.delivery_methods,
+            "liquidate": action.liquidate,
+            "price_multipliers": action.price_multipliers,
+        }
+        violations = self.directive_engine.check_compliance(self.current_day, env_state, action_data)
+        self.total_violations += len(violations)
 
-        if day_profit < 0:
-            R_profit_bool = -0.5
-        elif day_profit == 0:
-            R_profit_bool = 0.0 
-        else:
-            R_profit_bool = 1.0
+        # --- Milestones ---
+        milestone_bonus = self._check_milestones()
 
+        # --- Reward ---
+        # Dense signals (sum to 1.0 for base, range [-1.0, +1.0])
+        R_revenue = 2.0 * (day_revenue / max(max_daily_revenue, 1.0)) - 1.0
+        R_fulfillment = 2.0 * (total_sold / max(total_demand_units, 1)) - 1.0
 
-
-
-        total_managed = total_inventory + total_delivered_units
-        wasted_units = expired_groceries_count + total_liquidated_units
-        waste_rate = wasted_units / max(total_managed, 1)
+        total_managed = total_inventory + total_delivered
+        waste_rate = (expired_count + liquidated_units) / max(total_managed, 1)
         R_waste = max(-1.0, 1.0 - 2.0 * min(waste_rate * 3, 1.0))
 
-        # R_revenue: fraction of today's possible revenue captured
-        R_revenue = max(-1.0, min(1.0, (2 * day_revenue / max(max_daily_revenue, 1.0) - 1.0)))
+        active_checkable = sum(1 for d in self.directive_engine.active.values()
+                               if d.active)
+        if active_checkable > 0:
+            R_directives = 1.0 - (2.0 * len(violations) / active_checkable)
+        else:
+            R_directives = 1.0
+        R_directives = max(-1.0, min(1.0, R_directives))
 
-        # R_cash_health: sustainable cash position?
-        cash_ratio = self.cash / self.task["initial_cash"]
-        R_cash_health = max(-1.0, min(1.0, cash_ratio - 0.3))
+        R_planning = self._compute_R_planning(action, violations)
 
-        # R_capacity_util: warehouse utilization across all products
-        # 0% util → -1.0, 50% → 0.0, 100% → +1.0
-        utilizations = []
-        for p in self.inventory:
-            stock = sum(b[0] for b in self.inventory[p])
-            utilizations.append(stock / self.inventory_capacity[p])
-        avg_util = sum(utilizations) / len(utilizations)
-        R_capacity_util = max(-1.0, min(1.0, 2.0 * avg_util - 1.0))
+        # Hard fails
+        hard_penalty = 0.0
+        if had_unaffordable:
+            hard_penalty -= 1.0
+        if self.cash < 10:
+            hard_penalty -= 2.0
 
-        # R_fulfillment: fraction of demand met (unit-based), mapped to [-1, +1]
-        R_fulfillment = 2.0 * (total_sold_units / max(total_demand_units, 1)) - 1.0
-
-        # Hard-fail: invalid action (negative quantities, invalid products, or liquidating more than available)
-        invalid_action = False
-        for p, qty in action.buy_quantities.items():
-            if qty < 0 or p not in BASE_PRICES:
-                invalid_action = True
-                break
-        for p, qty in action.liquidate.items():
-            if qty < 0 or p not in BASE_PRICES:
-                invalid_action = True
-                break
-            available = sum(b[0] for b in self.inventory.get(p, []))
-            if qty > available:
-                invalid_action = True
-                break
-
-        # Hard-fail: cash below $10
-        bankrupt = self.cash < 10.0
-
-        # Hard-fail: do-nothing for 3+ consecutive days
         is_idle = (not action.buy_quantities or all(v == 0 for v in action.buy_quantities.values())) and \
                   (not action.liquidate or all(v == 0 for v in action.liquidate.values()))
         if is_idle:
             self.consecutive_idle_days += 1
         else:
             self.consecutive_idle_days = 0
-        idle_penalty = self.consecutive_idle_days >= 3
+        if self.consecutive_idle_days >= 3:
+            hard_penalty -= 1.0
 
-        # Apply hard-fail gates — independent, all stack on top of weighted reward
-        hard_fail_penalty = 0.0
-        if invalid_action:
-            hard_fail_penalty -= 1.0
-        if had_unaffordable_order:
-            hard_fail_penalty -= 1.0
-        if bankrupt:
-            hard_fail_penalty -= 1.0
-        if idle_penalty:
-            hard_fail_penalty -= 1.0
+        # Directive violation penalties
+        directive_penalty = sum(v["penalty"] for v in violations)
 
-        self.reward = (0.25 * R_revenue
-                     + 0.20 * R_fulfillment
-                     + 0.15 * R_waste
-                     + 0.15 * R_cash_health
-                     + 0.15 * R_capacity_util
-                     + 0.10 * R_profit_bool
-                     + hard_fail_penalty)
-
-        return InventoryObservation(
-            current_day = self.current_day,
-            total_cash = self.cash,
-            day_profit = day_profit,
-            total_profit = self.total_profit,
-            demand_today = demand,
-            updated_inventory = copy.deepcopy(self.inventory),
-            remaining_capacity = {p: max(0, self.inventory_capacity[p] - sum(b[0] for b in self.inventory[p])) for p in self.inventory},
-            updated_events = copy.deepcopy(self.events),
-            updated_deliveries = copy.deepcopy(self.deliveries),
-            reward = self.reward,
-            metadata = {
-                "reward_breakdown": {
-                    "R_profit_bool": R_profit_bool,
-                    "R_revenue": R_revenue,
-                    "R_fulfillment": R_fulfillment,
-                    "R_waste": R_waste,
-                    "R_cash_health": R_cash_health,
-                    "R_capacity_util": R_capacity_util,
-                },
-                "hard_fails": {
-                    "invalid_action": invalid_action,
-                    "unaffordable_order": had_unaffordable_order,
-                    "bankrupt": bankrupt,
-                    "idle_penalty": idle_penalty,
-                },
-            },
-            done = done,
+        # Dense per-step signals (weighted sum = 1.0, range [-1, +1])
+        dense_reward = (
+            0.40 * R_directives +
+            0.20 * R_planning +
+            0.15 * R_revenue +
+            0.15 * R_fulfillment +
+            0.10 * R_waste
         )
 
+        # Sparse signals (event-driven, not every step)
+        sparse_reward = (
+            milestone_bonus +        # +1.5 to +5.0 on milestone achievement
+            directive_penalty +      # -0.3 to -5.0 per violation
+            hard_penalty             # -1.0 to -2.0 for hard fails
+        )
+
+        self.reward = dense_reward + sparse_reward
+
+        # Update state
+        self._state = InventoryState(
+            episode_id=self._state.episode_id,
+            current_day=self.current_day,
+            total_days=self.max_days,
+            cash=self.cash,
+            total_profit=self.total_profit,
+            inventory={p: sum(b[0] for b in self.inventory[p]) for p in self.inventory},
+            active_directives=self.directive_engine.get_active_count(),
+            total_violations=self.total_violations,
+            milestones_achieved=len(self.milestones_achieved),
+            milestones_total=len(self.task["milestones"]),
+        )
+
+        return InventoryObservation(
+            current_day=self.current_day,
+            total_days=self.max_days,
+            total_cash=self.cash,
+            day_profit=day_profit,
+            total_profit=self.total_profit,
+            demand_today=demand,
+            updated_inventory=copy.deepcopy(self.inventory),
+            remaining_capacity={p: max(0, self.inventory_capacity[p] - sum(b[0] for b in self.inventory[p])) for p in self.inventory},
+            updated_events=copy.deepcopy(self.events),
+            updated_deliveries=copy.deepcopy(self.deliveries),
+            new_directives=[{
+                "id": d.id, "type": d.type, "text": d.text,
+                "expires_day": d.expires, "replaces": d.modifies,
+            } for d in new_directives],
+            active_directive_ids=self.directive_engine.get_active_ids(),
+            directive_violations_last_step=violations,
+            milestones=self._milestone_status(),
+            agent_notes=self.agent_notes,
+            agent_weekly_plan=self.agent_weekly_plan,
+            reward=self.reward,
+            done=done,
+        )
+
+    def _compute_R_planning(self, action, violations):
+        """Content-aware planning reward. Range: [-1.0, +1.0]."""
+        notes = action.notes_to_self or ""
+        plan = action.weekly_plan or ""
+
+        # No notes and no plan = worst case
+        if not notes and not plan:
+            self._prev_notes = ""
+            return -1.0
+
+        score = -0.5  # Start negative; must earn your way to positive
+
+        # 1. Directive tracking (up to +0.50)
+        active_ids = self.directive_engine.get_active_ids()
+        if active_ids:
+            ids_mentioned = sum(1 for d_id in active_ids if d_id in notes)
+            score += 0.50 * (ids_mentioned / len(active_ids))
+
+        # 2. Situational awareness (up to +0.30)
+        products = ["electronics", "clothing", "groceries", "furniture", "toys"]
+        products_mentioned = sum(1 for p in products if p in notes.lower() or p in plan.lower())
+        has_numbers = sum(1 for c in notes if c.isdigit()) > 3
+        score += (min(products_mentioned, 3) / 3) * 0.15
+        score += 0.15 if has_numbers else 0.0
+
+        # 3. Note evolution (up to +0.30, penalty for copy-paste)
+        if self._prev_notes:
+            if notes == self._prev_notes:
+                score -= 0.30  # copy-paste = big penalty
+            elif len(notes) > 30:
+                score += 0.30  # evolved notes = full credit
+        else:
+            score += 0.15 if len(notes) > 30 else 0.0
+        self._prev_notes = notes
+
+        # 4. Violation acknowledgment (up to +0.20)
+        if violations:
+            violation_ids = [v['id'] for v in violations]
+            acknowledged = sum(1 for v_id in violation_ids if v_id in notes)
+            score += 0.20 * (acknowledged / len(violation_ids))
+
+        # 5. Plan structure (up to +0.20)
+        if plan:
+            plan_words = len(plan.split())
+            has_structure = any(m in plan for m in [':', '-', '1.', '2.', '*'])
+            score += 0.10 if plan_words > 15 else 0.0
+            score += 0.10 if has_structure else 0.0
+
+        return max(-1.0, min(1.0, score))
 
     def _generate_demand(self):
         rng = random.Random(self.seed * 1000 + self.current_day)
         demand = {}
-
         for product, (lo, hi) in self.base_demand.items():
             demand[product] = rng.randint(lo, hi)
 
-        # weekend boost
         if self.current_day % 7 in (5, 6):
             for product in demand:
                 demand[product] = int(demand[product] * WEEKEND_MULTIPLIER)
 
-        # active event multipliers (only for EVENT_DURATION days after triggering)
         for event_name, days in self.events.items():
             if -EVENT_DURATION < days <= 0 and event_name in EVENT_EFFECTS:
                 for product, mult in EVENT_EFFECTS[event_name].items():
@@ -372,6 +427,66 @@ class InventoryEnvironment(Environment):
 
         return demand
 
+    def _milestone_status(self):
+        status = {}
+        for name, m in self.task["milestones"].items():
+            current = self._get_milestone_value(m["metric"])
+            status[name] = {
+                "target": m["target"],
+                "deadline": m["deadline"],
+                "achieved": name in self.milestones_achieved,
+                "current": current,
+            }
+        return status
+
+    def _get_milestone_value(self, metric):
+        if metric == "total_profit":
+            return self.total_profit
+        elif metric == "waste_rate_below":
+            total_through = self.total_waste + sum(sum(b[0] for b in self.inventory[p]) for p in self.inventory)
+            return self.total_waste / max(total_through, 1)
+        elif metric == "furniture_stock_zero":
+            return sum(b[0] for b in self.inventory.get("furniture", []))
+        elif metric == "clothing_stock_zero":
+            return sum(b[0] for b in self.inventory.get("clothing", []))
+        elif metric == "toys_stock_above":
+            return sum(b[0] for b in self.inventory.get("toys", []))
+        elif metric == "grocery_waste_zero_streak":
+            return self.grocery_waste_streak
+        return 0.0
+
+    def _check_milestones(self) -> float:
+        bonus = 0.0
+        for name, m in self.task["milestones"].items():
+            if name in self.milestones_achieved:
+                continue
+            if self.current_day > m["deadline"]:
+                continue
+
+            achieved = False
+            metric = m["metric"]
+            target = m["target"]
+
+            if metric == "total_profit":
+                achieved = self.total_profit >= target
+            elif metric == "waste_rate_below":
+                total_through = self.total_waste + sum(sum(b[0] for b in self.inventory[p]) for p in self.inventory)
+                rate = self.total_waste / max(total_through, 1)
+                achieved = rate < target
+            elif metric == "furniture_stock_zero":
+                achieved = sum(b[0] for b in self.inventory.get("furniture", [])) == 0
+            elif metric == "clothing_stock_zero":
+                achieved = sum(b[0] for b in self.inventory.get("clothing", [])) == 0
+            elif metric == "toys_stock_above":
+                achieved = sum(b[0] for b in self.inventory.get("toys", [])) >= target
+            elif metric == "grocery_waste_zero_streak":
+                achieved = self.grocery_waste_streak >= target
+
+            if achieved:
+                self.milestones_achieved.add(name)
+                bonus += m["bonus"]
+
+        return bonus
 
     @property
     def state(self) -> InventoryState:

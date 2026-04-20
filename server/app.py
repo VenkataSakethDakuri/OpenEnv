@@ -22,6 +22,8 @@ def list_tasks():
             "inventory_capacity": config["inventory_capacity"],
             "base_demand": demand,
             "events": config["events"],
+            "num_directives": len(config["directives"]),
+            "num_milestones": len(config["milestones"]),
         })
     return {"tasks": task_list}
 
