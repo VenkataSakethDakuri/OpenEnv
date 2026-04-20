@@ -199,13 +199,36 @@ def parse_action(response_text):
                     text = part
                     break
 
-        # Extract JSON
+        # Find the JSON object by matching braces (handles nested dicts)
         start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            text = text[start:end + 1]
+        if start == -1:
+            raise ValueError("No JSON object found")
 
-        data = json.loads(text)
+        # Walk forward counting braces to find matching close
+        depth = 0
+        end = -1
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+
+        if end == -1:
+            # Truncated JSON — try to salvage by finding last complete key-value pair
+            text = text[start:]
+            # Find the last complete key-value before truncation
+            # Strategy: progressively trim until json.loads works
+            salvaged = _salvage_truncated_json(text)
+            if salvaged:
+                data = salvaged
+            else:
+                raise ValueError("Truncated JSON could not be salvaged")
+        else:
+            text = text[start:end + 1]
+            data = json.loads(text)
 
         clean = {}
         for key in ["buy_quantities", "delivery_methods", "liquidate",
@@ -218,6 +241,44 @@ def parse_action(response_text):
         print(f"  [DEBUG] Parse FAILED: {e}")
         print(f"  [DEBUG] Raw: {response_text[:300]}")
         return InventoryAction()
+
+
+def _salvage_truncated_json(text):
+    """Try to extract whatever complete key-value pairs exist in truncated JSON."""
+    import re
+
+    # Try progressively removing trailing content until it parses
+    # Find positions of all complete "key": value pairs
+    result = {}
+
+    # Extract complete top-level string values: "key": "value"
+    for m in re.finditer(r'"(buy_quantities|delivery_methods|liquidate|price_multipliers|notes_to_self|weekly_plan)"\s*:\s*', text):
+        key = m.group(1)
+        rest = text[m.end():]
+
+        if rest.startswith('"'):
+            # String value — find closing quote
+            str_end = rest.find('"', 1)
+            if str_end != -1:
+                result[key] = rest[1:str_end]
+        elif rest.startswith('{'):
+            # Dict value — find matching brace
+            depth = 0
+            for i, c in enumerate(rest):
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            result[key] = json.loads(rest[:i+1])
+                        except json.JSONDecodeError:
+                            pass
+                        break
+        elif rest.startswith('null'):
+            result[key] = None
+
+    return result if result else None
 
 
 def run_task(client, task_name):
@@ -249,7 +310,7 @@ def run_task(client, task_name):
                     model=MODEL_NAME,
                     messages=messages,
                     temperature=0.0,
-                    max_completion_tokens=600,
+                    max_completion_tokens=800,
                     stream=False,
                 )
                 response_text = completion.choices[0].message.content or ""
