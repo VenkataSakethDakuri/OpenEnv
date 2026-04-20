@@ -23,7 +23,7 @@ def _run_passive(task_name):
     while not obs.done:
         action = InventoryAction(
             buy_quantities={},
-            delivery_method="slow",
+            delivery_methods={},
             liquidate={},
         )
         obs = env.step(action)
