@@ -291,7 +291,7 @@ def run_task(client, task_name):
     score = 0.0
     success = False
 
-    print(f"[START] task={task_name} env=inventory_env model={MODEL_NAME}", flush=True)
+    print(f"[START] task={task_name} env=quartermaster-env model={MODEL_NAME}", flush=True)
 
     try:
         for day in range(1, env.max_days + 1):

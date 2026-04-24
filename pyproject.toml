@@ -1,7 +1,7 @@
 [project]
-name = "inventory-env"
+name = "quartermaster-env"
 version = "0.1.0"
-description = "Retail Inventory Optimization RL Environment for OpenEnv"
+description = "Quartermaster — Long-Horizon Inventory RL Environment for OpenEnv"
 requires-python = ">=3.10"
 dependencies = [
     "openenv-core[core]>=0.2.0",

@@ -322,6 +322,18 @@ class InventoryEnvironment(Environment):
 
         self.reward = dense_reward + sparse_reward
 
+        # Expose sub-components for training diagnostics
+        self.reward_components = {
+            "R_directives": R_directives,
+            "R_planning": R_planning,
+            "R_revenue": R_revenue,
+            "R_fulfillment": R_fulfillment,
+            "R_waste": R_waste,
+            "milestone_bonus": milestone_bonus,
+            "directive_penalty": directive_penalty,
+            "hard_penalty": hard_penalty,
+        }
+
         # Update state
         self._state = InventoryState(
             episode_id=self._state.episode_id,
