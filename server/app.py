@@ -4,7 +4,7 @@ from server.grader import grade, compute_baselines
 from server.constants import TASKS
 from models import InventoryAction, InventoryObservation
 
-app = create_app(InventoryEnvironment, InventoryAction, InventoryObservation, env_name="inventory_env")
+app = create_app(InventoryEnvironment, InventoryAction, InventoryObservation, env_name="quartermaster-env")
 
 
 @app.get("/tasks")
