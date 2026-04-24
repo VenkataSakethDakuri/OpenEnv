@@ -53,6 +53,14 @@ SYSTEM_PROMPT = textwrap.dedent("""
     LIQUIDATE: Dispose of stock for no revenue. Units are removed from inventory.
     Use to: free warehouse space, comply with recall directives, dump expiring groceries.
 
+    LOANS (recovery from mistakes):
+    - If cash drops below $100, you can set "take_loan": true to borrow $500.
+    - Interest: 3% daily compound on outstanding balance.
+    - Auto-repayment: 15% of daily revenue goes toward the loan.
+    - At episode end, remaining balance is subtracted from total profit.
+    - Maximum 2 loans per episode. After that, going broke = game over.
+    - Strategy: take a loan early if needed (more time to repay), but avoid if possible.
+
     Events boost demand when countdown hits 0 (last 3 days).
     Weekends (day%7 == 5 or 6) have 1.2x demand.
 
@@ -78,7 +86,8 @@ SYSTEM_PROMPT = textwrap.dedent("""
         "liquidate": {"product": quantity, ...},
         "price_multipliers": {"product": multiplier, ...},
         "notes_to_self": "Your private scratchpad...",
-        "weekly_plan": "Your current plan..."
+        "weekly_plan": "Your current plan...",
+        "take_loan": false
     }
 
     Before the JSON, reason briefly (2-3 lines):
@@ -174,6 +183,8 @@ Deliveries:
 
 Milestones:
 {milestones_text}
+
+Loan: balance=${obs.loan_balance:.0f} | taken={obs.loans_taken} | remaining={obs.loans_remaining}
 
 Your Notes: {obs.agent_notes if obs.agent_notes else '(empty)'}
 Your Plan: {obs.agent_weekly_plan if obs.agent_weekly_plan else '(empty)'}

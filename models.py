@@ -13,6 +13,7 @@ class InventoryAction(Action):
     price_multipliers: Dict[str, float] = {}
     notes_to_self: str = ""
     weekly_plan: Optional[str] = None
+    take_loan: bool = False
 
     @field_validator("buy_quantities", "liquidate", "price_multipliers", "delivery_methods", mode="before")
     @classmethod
@@ -47,6 +48,9 @@ class InventoryObservation(Observation):
     milestones: Dict[str, Dict] = {}
     agent_notes: str = ""
     agent_weekly_plan: str = ""
+    loan_balance: float = 0.0
+    loans_taken: int = 0
+    loans_remaining: int = 2
 
 
 class InventoryState(State):
@@ -60,3 +64,5 @@ class InventoryState(State):
     total_violations: int = 0
     milestones_achieved: int = 0
     milestones_total: int = 0
+    loan_balance: float = 0.0
+    loans_taken: int = 0

@@ -70,6 +70,13 @@ PRICE_ELASTICITY = {
 WEEKEND_MULTIPLIER = 1.2
 EVENT_DURATION = 3
 
+# --- LOAN SYSTEM ---
+LOAN_AMOUNT = 500.0
+LOAN_DAILY_INTEREST = 0.01  # 1% daily compound
+LOAN_REVENUE_REPAYMENT = 0.15  # 15% of daily revenue auto-deducted (0 if no revenue)
+LOAN_ELIGIBILITY_THRESHOLD = 100.0  # can only take loan when cash < 100
+MAX_LOANS = 2  # max loans per episode; 3rd bankruptcy = game over
+
 # --- EVENTS ---
 
 EVENTS_EASY = {}

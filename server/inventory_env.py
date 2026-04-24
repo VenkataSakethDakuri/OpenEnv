@@ -8,6 +8,8 @@ from .constants import (
     BASE_PRICES, COST_PRICES, SHELF_LIFE, SHIPPING_COST, SHIPPING_DAYS,
     EXTRA_INVENTORY_COST, WEEKEND_MULTIPLIER,
     EVENT_EFFECTS, EVENT_DURATION, PRICE_ELASTICITY, TASKS,
+    LOAN_AMOUNT, LOAN_DAILY_INTEREST, LOAN_REVENUE_REPAYMENT,
+    LOAN_ELIGIBILITY_THRESHOLD, MAX_LOANS,
 )
 from .directives import DirectiveEngine
 
@@ -55,6 +57,10 @@ class InventoryEnvironment(Environment):
         self.grocery_waste_streak = 0
         self._prev_notes = ""
 
+        # Loan state
+        self.loan_balance = 0.0
+        self.loans_taken = 0
+
         self._state = InventoryState(
             episode_id=str(uuid4()),
             current_day=0,
@@ -66,6 +72,8 @@ class InventoryEnvironment(Environment):
             total_violations=0,
             milestones_achieved=0,
             milestones_total=len(self.task["milestones"]),
+            loan_balance=0.0,
+            loans_taken=0,
         )
 
         return InventoryObservation(
@@ -85,6 +93,9 @@ class InventoryEnvironment(Environment):
             milestones=self._milestone_status(),
             agent_notes="",
             agent_weekly_plan="",
+            loan_balance=0.0,
+            loans_taken=0,
+            loans_remaining=MAX_LOANS,
             reward=0.0,
             done=False,
         )
@@ -100,6 +111,16 @@ class InventoryEnvironment(Environment):
             self.agent_notes = action.notes_to_self
         if action.weekly_plan is not None:
             self.agent_weekly_plan = action.weekly_plan
+
+        # --- Loan processing ---
+        if action.take_loan and self.cash < LOAN_ELIGIBILITY_THRESHOLD and self.loans_taken < MAX_LOANS:
+            self.cash += LOAN_AMOUNT
+            self.loan_balance += LOAN_AMOUNT
+            self.loans_taken += 1
+
+        # Compound interest on outstanding loan
+        if self.loan_balance > 0:
+            self.loan_balance *= (1.0 + LOAN_DAILY_INTEREST)
 
         # Weekly reset
         if (self.current_day - self.week_start_day) >= 7:
@@ -245,6 +266,19 @@ class InventoryEnvironment(Environment):
         self.total_profit += day_profit
         done = self.current_day >= self.max_days
 
+        # Loan repayment: 15% of daily revenue auto-deducted
+        loan_repayment = 0.0
+        if self.loan_balance > 0 and day_revenue > 0:
+            loan_repayment = min(day_revenue * LOAN_REVENUE_REPAYMENT, self.loan_balance)
+            self.cash -= loan_repayment
+            self.loan_balance -= loan_repayment
+
+        # End of episode: subtract remaining loan balance from total profit and cash
+        if done and self.loan_balance > 0:
+            self.total_profit -= self.loan_balance
+            self.cash -= self.loan_balance
+            self.loan_balance = 0.0
+
         # --- Directive compliance ---
         env_state = {
             "inventory": self.inventory,
@@ -289,8 +323,8 @@ class InventoryEnvironment(Environment):
         hard_penalty = 0.0
         if had_unaffordable:
             hard_penalty -= 1.0
-        if self.cash < 10:
-            hard_penalty -= 2.0
+        if self.cash < 10 and self.loans_taken >= MAX_LOANS:
+            hard_penalty -= 2.0  # true bankruptcy: no more loans available
 
         is_idle = (not action.buy_quantities or all(v == 0 for v in action.buy_quantities.values())) and \
                   (not action.liquidate or all(v == 0 for v in action.liquidate.values()))
@@ -346,6 +380,8 @@ class InventoryEnvironment(Environment):
             total_violations=self.total_violations,
             milestones_achieved=len(self.milestones_achieved),
             milestones_total=len(self.task["milestones"]),
+            loan_balance=round(self.loan_balance, 2),
+            loans_taken=self.loans_taken,
         )
 
         return InventoryObservation(
@@ -368,6 +404,9 @@ class InventoryEnvironment(Environment):
             milestones=self._milestone_status(),
             agent_notes=self.agent_notes,
             agent_weekly_plan=self.agent_weekly_plan,
+            loan_balance=round(self.loan_balance, 2),
+            loans_taken=self.loans_taken,
+            loans_remaining=MAX_LOANS - self.loans_taken,
             reward=self.reward,
             done=done,
         )

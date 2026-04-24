@@ -30,6 +30,7 @@ Retail inventory optimization is a real-world task performed daily by store mana
 | **Directive modifications** | Later directives UPDATE or CANCEL earlier ones. Agent must track which version is current. |
 | **90-step horizon** | Decisions on day 5 affect outcomes on day 40. Shipping delays, expiry, and milestone deadlines force genuine long-range planning. |
 | **Content-aware planning score** | Notes are scored for quality (directive tracking, evolution, situational awareness) — not just length. Copy-paste is penalized. |
+| **Loan-based error recovery** | When cash drops below $100, the agent can take a $500 loan at 3% daily compound interest. This replaces the death-spiral bankruptcy penalty with a strategic recovery decision — take loan early (more interest but more time to repay) or late (less interest but fewer days). Remaining balance is subtracted from total profit at episode end. Max 2 loans per episode. |
 
 ## Environment Overview
 
@@ -112,6 +113,27 @@ Time-bound targets that reward forward planning:
 
 Milestones require advance preparation and cannot be achieved reactively on the deadline day.
 
+### Loan System (Error Recovery)
+
+A key Theme #2 requirement is that agents can **recover from early mistakes**. Rather than a permanent bankruptcy death spiral (-2.0/step), agents can take emergency loans:
+
+| Parameter | Value |
+|-----------|-------|
+| Eligibility | Cash below $100 |
+| Amount | $500 per loan |
+| Interest | 3% daily compound |
+| Auto-repayment | 15% of daily revenue deducted toward balance |
+| Max loans | 2 per episode |
+| End-of-episode | Remaining balance subtracted from total profit |
+
+**Strategic depth:**
+- **Early loan** = more days of compounding interest, but more time to generate revenue and repay
+- **Late loan** = less interest, but fewer days to recover
+- **No loan** = if still solvent, avoid the interest cost entirely
+- **Third bankruptcy** = true game over (-2.0/step hard penalty, no more loans)
+
+**Example scenario:** Agent overspends on day 15, cash drops to $30. It takes a $500 loan (balance = $500). Over 20 days at 3% daily compound, the balance grows to ~$903. With 15% revenue auto-repayment (~$15-25/day), the agent pays off ~$300-500, leaving ~$400-600 subtracted from final profit. A well-recovering agent minimizes the damage; a poorly-planning agent takes a second loan and spirals.
+
 ## Action Space
 
 ```python
@@ -122,6 +144,7 @@ class InventoryAction(Action):
     price_multipliers: Dict[str, float] = {}     # Per-product pricing (0.5-1.5x)
     notes_to_self: str = ""                      # Agent's private scratchpad (persists)
     weekly_plan: Optional[str] = None            # Persistent plan (until overwritten)
+    take_loan: bool = False                      # Request $500 loan (when cash < $100)
 ```
 
 | Field | Description |
@@ -132,6 +155,7 @@ class InventoryAction(Action):
 | `price_multipliers` | Per-product selling price multiplier (0.5-1.5). Affects demand via elasticity. Default 1.0 if omitted. |
 | `notes_to_self` | Agent's private scratchpad. Persisted and returned in next observation. |
 | `weekly_plan` | Persistent plan shown every step until overwritten. |
+| `take_loan` | Set `true` to request a $500 loan. Only works when cash < $100 and loans_taken < 2. |
 
 ## Observation Space
 
@@ -153,6 +177,9 @@ class InventoryObservation(Observation):
     milestones: Dict[str, Dict]                     # Target, deadline, progress
     agent_notes: str                                # Returned from previous step
     agent_weekly_plan: str                          # Persistent plan
+    loan_balance: float                             # Outstanding loan + interest
+    loans_taken: int                                # Loans used so far
+    loans_remaining: int                            # Loans still available
 ```
 
 ## Reward Structure
@@ -183,7 +210,7 @@ Unlike simple length checks, planning notes are scored on **5 content signals**:
 
 - **Milestone bonuses**: +1.5 to +5.0 for achieving targets by deadlines
 - **Directive violations**: -0.3 to -5.0 per violated rule per step
-- **Hard fail gates**: -1.0 (unaffordable order attempted), -2.0 (bankruptcy, cash < $10), -1.0 (idle 3+ consecutive days)
+- **Hard fail gates**: -1.0 (unaffordable order attempted), -2.0 (true bankruptcy: cash < $10 with no loans remaining), -1.0 (idle 3+ consecutive days)
 
 ## Directive System
 
@@ -238,19 +265,23 @@ Both baselines are deterministic (seeded RNG) and computed fresh each run for re
 
 Each `step()` call processes in this order:
 1. Save agent memory (notes_to_self, weekly_plan)
-2. Weekly reset (spend/waste counters)
-3. Issue new directives, expire old ones
-4. Tick event countdowns
-5. Expire groceries (shelf life = 0)
-6. Receive arriving deliveries
-7. Process purchase orders (deduct cash, schedule with jitter)
-8. Generate demand (base + weekend + events + elasticity)
-9. Sell products FIFO
-10. Process liquidation FIFO
-11. Check directive compliance → violations
-12. Check milestones → bonuses
-13. Compute decomposed reward
-14. Return observation
+2. Process loan request (if take_loan=true, cash < $100, loans < 2)
+3. Compound interest on outstanding loan balance
+4. Weekly reset (spend/waste counters)
+5. Issue new directives, expire old ones
+6. Tick event countdowns
+7. Expire groceries (shelf life = 0)
+8. Receive arriving deliveries
+9. Process purchase orders (deduct cash, schedule with jitter)
+10. Generate demand (base + weekend + events + elasticity)
+11. Sell products FIFO
+12. Process liquidation FIFO
+13. Auto-repay 15% of daily revenue toward loan
+14. End-of-episode: subtract remaining loan balance from total profit
+15. Check directive compliance → violations
+16. Check milestones → bonuses
+17. Compute decomposed reward
+18. Return observation
 
 ## Setup
 
