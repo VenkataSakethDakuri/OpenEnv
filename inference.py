@@ -243,7 +243,8 @@ def parse_action(response_text):
 
         clean = {}
         for key in ["buy_quantities", "delivery_methods", "liquidate",
-                     "price_multipliers", "notes_to_self", "weekly_plan"]:
+                     "price_multipliers", "notes_to_self", "weekly_plan",
+                     "take_loan"]:
             if key in data:
                 clean[key] = data[key]
 

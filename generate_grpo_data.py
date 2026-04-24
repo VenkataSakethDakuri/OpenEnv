@@ -62,6 +62,8 @@ def action_to_dict(action):
         d["notes_to_self"] = action.notes_to_self
     if action.weekly_plan is not None:
         d["weekly_plan"] = action.weekly_plan
+    if action.take_loan:
+        d["take_loan"] = True
     return d
 
 

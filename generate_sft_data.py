@@ -115,7 +115,8 @@ def run_episode_and_collect(client, task_name, episode_num):
                     json_str = text[start:end + 1]
                     data = json.loads(json_str)
                     valid_keys = {"buy_quantities", "delivery_methods", "liquidate",
-                                  "price_multipliers", "notes_to_self", "weekly_plan"}
+                                  "price_multipliers", "notes_to_self", "weekly_plan",
+                                  "take_loan"}
                     if any(k in data for k in valid_keys):
                         parsed_ok = True
         except (json.JSONDecodeError, ValueError):
