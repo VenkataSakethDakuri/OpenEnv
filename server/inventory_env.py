@@ -1,7 +1,13 @@
 from openenv.core.env_server.interfaces import Environment
 import copy
+import hashlib
 import random
 from uuid import uuid4
+
+
+def _stable_hash(s: str) -> int:
+    """Deterministic hash that is consistent across Python processes."""
+    return int(hashlib.md5(s.encode()).hexdigest(), 16) % (10**9)
 
 from models import InventoryAction, InventoryObservation, InventoryState
 from .constants import (
@@ -186,7 +192,7 @@ class InventoryEnvironment(Environment):
             day_cost += total_cost
 
             arrival_day = self.current_day + SHIPPING_DAYS[method]
-            jitter_rng = random.Random(self.seed * 2000 + self.current_day * 100 + hash(product))
+            jitter_rng = random.Random(self.seed * 2000 + self.current_day * 100 + _stable_hash(product))
             if method == "slow":
                 arrival_day += jitter_rng.randint(-2, 2)
             elif method == "medium":

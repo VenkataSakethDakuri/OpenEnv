@@ -163,6 +163,12 @@ def main():
             all_examples.extend(examples)
             task_rewards.extend(rewards)
 
+            # Write continuously after each episode so partial progress is saved
+            with open(OUTPUT_FILE, "a") as f:
+                for ex in examples:
+                    f.write(json.dumps(ex) + "\n")
+            log.info(f"Flushed {len(examples)} prompts to {OUTPUT_FILE}")
+
         all_rewards[task_name] = task_rewards
         if task_rewards:
             log.info(
@@ -171,12 +177,8 @@ def main():
                 f"min={min(task_rewards):.3f}, max={max(task_rewards):.3f}"
             )
 
-    with open(OUTPUT_FILE, "a") as f:
-        for ex in all_examples:
-            f.write(json.dumps(ex) + "\n")
-
     total_time = time.time() - run_start
-    log.info(f"Appended {len(all_examples)} examples to {OUTPUT_FILE} ({total_time:.1f}s total)")
+    log.info(f"Total {len(all_examples)} prompts in {OUTPUT_FILE} ({total_time:.1f}s total)")
 
     # Save reward stats for analysis
     stats_file = OUTPUT_FILE.replace(".jsonl", "_stats.json")

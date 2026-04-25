@@ -184,19 +184,20 @@ def main():
             task_rewards.extend([e["reward"] for e in examples])
             all_examples.extend(examples)
 
+            # Write continuously after each episode so partial progress is saved
+            with open(OUTPUT_FILE, "a") as f:
+                for ex in examples:
+                    f.write(json.dumps(ex) + "\n")
+            log.info(f"Flushed {len(examples)} examples to {OUTPUT_FILE}")
+
         avg = sum(task_rewards) / len(task_rewards) if task_rewards else 0
         log.info(
             f"[{task_name}] SUMMARY: {task_total} valid, {task_failures} failures, "
             f"avg_reward={avg:.3f}"
         )
 
-    # Append all examples
-    with open(OUTPUT_FILE, "a") as f:
-        for ex in all_examples:
-            f.write(json.dumps(ex) + "\n")
-
     total_time = time.time() - run_start
-    log.info(f"Appended {len(all_examples)} examples to {OUTPUT_FILE} ({total_time:.1f}s total)")
+    log.info(f"Total {len(all_examples)} examples in {OUTPUT_FILE} ({total_time:.1f}s total)")
 
     # Final stats
     log.info("=== FINAL STATS ===")
