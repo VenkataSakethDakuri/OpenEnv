@@ -42,7 +42,7 @@ log = logging.getLogger("sft_train")
 
 # --- Config ---
 SFT_DATA_FILE = os.getenv("SFT_DATA_FILE", "sft_data.jsonl")
-MIN_REWARD = float(os.getenv("MIN_REWARD", "-999"))
+MIN_REWARD = float(os.getenv("MIN_REWARD", "-10"))
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./sft_model")
 NUM_EPOCHS = int(os.getenv("NUM_EPOCHS", "3"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "2"))
@@ -352,9 +352,44 @@ def main():
     log.info(f"Saving merged model to {merged_dir}")
     model.save_pretrained_merged(merged_dir, tokenizer, save_method="merged_16bit")
 
+    # Push merged 16-bit model directly to the Hub
+    log.info("Pushing merged model to Hugging Face Hub...")
+    model.push_to_hub_merged(
+        "saketh1201/Qwen3-4B-Inventory-SFT",  # HuggingFace Hub repo
+        tokenizer,
+        save_method="merged_16bit",
+        token=os.environ.get("HF_TOKEN"),
+    )
+    log.info("Model pushed to Hugging Face Hub.")
+
     # Plot training curves
     log.info("Generating training curves...")
     plot_training_curves(trainer, OUTPUT_DIR, dataset)
+
+    # Upload training plots, logs, and dataset to the Hub
+    log.info("Uploading training plots, logs, and dataset to the Hub...")
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        # Upload plots and logs from OUTPUT_DIR
+        api.upload_folder(
+            folder_path=OUTPUT_DIR,
+            repo_id="saketh1201/Qwen3-4B-Inventory-SFT",
+            repo_type="model",
+            allow_patterns=["*.png", "*.json"],
+            token=os.environ.get("HF_TOKEN"),
+        )
+        # Upload the SFT training dataset
+        api.upload_file(
+            path_or_fileobj=SFT_DATA_FILE,
+            path_in_repo=f"data/{SFT_DATA_FILE}",
+            repo_id="saketh1201/Qwen3-4B-Inventory-SFT",
+            repo_type="model",
+            token=os.environ.get("HF_TOKEN"),
+        )
+        log.info("Successfully uploaded plots, logs, and dataset!")
+    except Exception as e:
+        log.error(f"Failed to upload artifacts: {e}")
 
     log.info("SFT training complete.")
 
