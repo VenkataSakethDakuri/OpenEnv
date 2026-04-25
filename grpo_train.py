@@ -610,6 +610,8 @@ def main():
         # Mask truncated completions instead of assigning them negative
         # reward, which confuses the model about valid reasoning paths
         mask_truncated_completions=True,
+        dataset_num_proc=2,  
+        optim="adamw_8bit"
     )
 
     trainer = GRPOTrainer(
@@ -626,13 +628,52 @@ def main():
     train_time = time.time() - train_start
     log.info(f"GRPO training finished in {train_time:.1f}s ({train_time/60:.1f}min)")
 
+    # Save LoRA adapter + tokenizer
+    log.info(f"Saving LoRA adapters to {OUTPUT_DIR}")
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
-    log.info(f"Model saved to {OUTPUT_DIR}")
+
+    # Save merged 16-bit model for inference deployment
+    merged_dir = OUTPUT_DIR.rstrip("/") + "_merged"
+    log.info(f"Saving merged model to {merged_dir}")
+    model.save_pretrained_merged(merged_dir, tokenizer, save_method="merged_16bit")
+
+    # Push merged 16-bit model to Hugging Face Hub
+    log.info("Pushing merged GRPO model to Hugging Face Hub...")
+    model.push_to_hub_merged(
+        "saketh1201/Qwen3-4B-Inventory-GRPO",
+        tokenizer,
+        save_method="merged_16bit",
+        token=os.environ.get("HF_TOKEN"),
+    )
+    log.info("Model pushed to Hugging Face Hub.")
 
     # Plot training curves
     log.info("Generating training curves...")
     plot_grpo_curves(OUTPUT_DIR, trainer)
+
+    # Upload training plots, logs, and dataset to the Hub
+    log.info("Uploading training plots, logs, and dataset to the Hub...")
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        api.upload_folder(
+            folder_path=OUTPUT_DIR,
+            repo_id="saketh1201/Qwen3-4B-Inventory-GRPO",
+            repo_type="model",
+            allow_patterns=["*.png", "*.json"],
+            token=os.environ.get("HF_TOKEN"),
+        )
+        api.upload_file(
+            path_or_fileobj=GRPO_DATA_FILE,
+            path_in_repo=f"data/{GRPO_DATA_FILE}",
+            repo_id="saketh1201/Qwen3-4B-Inventory-GRPO",
+            repo_type="model",
+            token=os.environ.get("HF_TOKEN"),
+        )
+        log.info("Successfully uploaded plots, logs, and dataset!")
+    except Exception as e:
+        log.error(f"Failed to upload artifacts: {e}")
 
     # Final summary
     if _reward_log:
