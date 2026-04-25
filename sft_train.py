@@ -325,13 +325,25 @@ def main():
         report_to="none",
         # Train only on assistant responses, not system/user prompts
         assistant_only_loss=True,
+        dataset_num_proc=2,
     )
 
     # Formatting function required by Unsloth's patched SFTTrainer
-    def formatting_func(example):
-        return tokenizer.apply_chat_template(
-            example["messages"], tokenize=False, add_generation_prompt=False
+    def formatting_func(examples):
+        # The tokenizer can automatically handle both single rows and batches
+        texts = tokenizer.apply_chat_template(
+            examples["messages"],
+            tokenize=False,
+            add_generation_prompt=False
         )
+
+        # Unsloth strictly requires a list.
+        # If the tokenizer returned a single string, wrap it in a list.
+        if isinstance(texts, str):
+            return [texts]
+
+        # If it's already a list (because it was batched), just return it.
+        return texts
 
     trainer = SFTTrainer(
         model=model,
