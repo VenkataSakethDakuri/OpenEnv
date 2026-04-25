@@ -327,13 +327,18 @@ def main():
         assistant_only_loss=True,
     )
 
-    # SFTTrainer handles chat template formatting automatically
-    # when dataset has "messages" column
+    # Formatting function required by Unsloth's patched SFTTrainer
+    def formatting_func(example):
+        return tokenizer.apply_chat_template(
+            example["messages"], tokenize=False, add_generation_prompt=False
+        )
+
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=dataset,
         args=training_args,
+        formatting_func=formatting_func,
     )
 
     log.info("Starting SFT training...")
