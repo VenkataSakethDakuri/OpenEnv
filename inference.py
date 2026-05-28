@@ -79,21 +79,23 @@ SYSTEM_PROMPT = textwrap.dedent("""
     90-day horizon. Directive compliance, profitability, and efficient planning
     all contribute to your score.
 
-    Respond with JSON:
+    RESPOND WITH ONLY A SINGLE JSON OBJECT. No reasoning, no explanation, no markdown fences.
+    Output MUST start with { and end with }. Nothing else.
+
+    JSON format:
     {
-        "buy_quantities": {"product": quantity, ...},
-        "delivery_methods": {"product": "slow"|"medium"|"fast", ...},
-        "liquidate": {"product": quantity, ...},
-        "price_multipliers": {"product": multiplier, ...},
-        "notes_to_self": "Your private scratchpad...",
-        "weekly_plan": "Your current plan...",
+        "buy_quantities": {"electronics": 0, "clothing": 0, "groceries": 0, "furniture": 0, "toys": 0},
+        "delivery_methods": {"electronics": "slow", "clothing": "slow", "groceries": "fast", "furniture": "slow", "toys": "slow"},
+        "liquidate": {"electronics": 0, "clothing": 0, "groceries": 0, "furniture": 0, "toys": 0},
+        "price_multipliers": {"electronics": 1.0, "clothing": 1.0, "groceries": 1.0, "furniture": 1.0, "toys": 1.0},
+        "notes_to_self": "Track directives, violations, plans here. This is your ONLY memory between steps.",
+        "weekly_plan": "Your strategic plan for the current week.",
         "take_loan": false
     }
 
-    Before the JSON, reason briefly (2-3 lines):
-    1. Any new directives to note? Any violations to fix?
-    2. What milestones are approaching?
-    3. What products need restocking?
+    delivery_methods must be exactly one of: "slow", "medium", "fast"
+    price_multipliers must be between 0.5 and 1.5
+    Use notes_to_self to remember directive text, track violations, and plan ahead.
 """).strip()
 
 
@@ -189,7 +191,7 @@ Loan: balance=${obs.loan_balance:.0f} | taken={obs.loans_taken} | remaining={obs
 Your Notes: {obs.agent_notes if obs.agent_notes else '(empty)'}
 Your Plan: {obs.agent_weekly_plan if obs.agent_weekly_plan else '(empty)'}
 
-Respond with reasoning then JSON."""
+"""
 
     return prompt
 
@@ -198,6 +200,15 @@ def parse_action(response_text):
     """Parse LLM response into InventoryAction."""
     try:
         text = response_text.strip()
+
+        # Strip Qwen3 thinking tokens if present
+        if "<think>" in text:
+            think_end = text.find("</think>")
+            if think_end != -1:
+                text = text[think_end + 8:].strip()
+            else:
+                # Unterminated thinking — take everything after <think>
+                text = text[text.find("<think>") + 7:].strip()
 
         # Strip markdown fences
         if "```" in text:
@@ -218,20 +229,32 @@ def parse_action(response_text):
         # Walk forward counting braces to find matching close
         depth = 0
         end = -1
+        in_string = False
+        escape_next = False
         for i in range(start, len(text)):
-            if text[i] == "{":
+            c = text[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if c == '\\' and in_string:
+                escape_next = True
+                continue
+            if c == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if c == "{":
                 depth += 1
-            elif text[i] == "}":
+            elif c == "}":
                 depth -= 1
                 if depth == 0:
                     end = i
                     break
 
         if end == -1:
-            # Truncated JSON — try to salvage by finding last complete key-value pair
+            # Truncated JSON — try to salvage
             text = text[start:]
-            # Find the last complete key-value before truncation
-            # Strategy: progressively trim until json.loads works
             salvaged = _salvage_truncated_json(text)
             if salvaged:
                 data = salvaged
@@ -239,7 +262,7 @@ def parse_action(response_text):
                 raise ValueError("Truncated JSON could not be salvaged")
         else:
             text = text[start:end + 1]
-            data = json.loads(text)
+            data = json.loads(text, strict=False)
 
         clean = {}
         for key in ["buy_quantities", "delivery_methods", "liquidate",
@@ -247,6 +270,15 @@ def parse_action(response_text):
                      "take_loan"]:
             if key in data:
                 clean[key] = data[key]
+
+        # Fix invalid delivery method values
+        if "delivery_methods" in clean and isinstance(clean["delivery_methods"], dict):
+            valid_methods = {"slow", "medium", "fast"}
+            clean["delivery_methods"] = {
+                k: str(v).lower().strip() if str(v).lower().strip() in valid_methods else "slow"
+                for k, v in clean["delivery_methods"].items()
+                if isinstance(k, str)
+            }
 
         return InventoryAction(**clean)
     except Exception as e:
@@ -283,7 +315,7 @@ def _salvage_truncated_json(text):
                     depth -= 1
                     if depth == 0:
                         try:
-                            result[key] = json.loads(rest[:i+1])
+                            result[key] = json.loads(rest[:i+1], strict=False)
                         except json.JSONDecodeError:
                             pass
                         break

@@ -45,6 +45,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("grpo_train")
 
+os.environ["UNSLOTH_VLLM_STANDBY"] = "1"
+# os.environ["VLLM_SLEEP_WHEN_IDLE"] = "0"
+
 # --- Config ---
 SFT_MODEL_DIR = os.getenv("SFT_MODEL_DIR", "./sft_model_merged")
 GRPO_DATA_FILE = os.getenv("GRPO_DATA_FILE", "grpo_data.jsonl")
@@ -52,11 +55,14 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./grpo_model")
 NUM_EPOCHS = int(os.getenv("NUM_EPOCHS", "1"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))
 GRAD_ACCUM = int(os.getenv("GRAD_ACCUM", "4"))
-MAX_SEQ_LENGTH = int(os.getenv("MAX_SEQ_LENGTH", "4096"))
-MAX_COMPLETION = int(os.getenv("MAX_COMPLETION", "1024"))
+MAX_SEQ_LENGTH = int(os.getenv("MAX_SEQ_LENGTH", "32000"))
+MAX_COMPLETION = int(os.getenv("MAX_COMPLETION", "32000"))
 NUM_GENERATIONS = int(os.getenv("NUM_GENERATIONS", "4"))
 LEARNING_RATE = float(os.getenv("LEARNING_RATE", "5e-6"))
 LORA_RANK = int(os.getenv("LORA_RANK", "32"))
+
+# Format reward weight — how much to penalize non-JSON / reward valid JSON
+FORMAT_REWARD_WEIGHT = float(os.getenv("FORMAT_REWARD_WEIGHT", "2.0"))
 
 # Track rewards across training for plotting
 _reward_log = []
@@ -75,41 +81,95 @@ def replay_to_step(task_name, prior_actions_json):
     return env
 
 
+def _score_format(text):
+    """Score the format quality of a completion. Returns float in [-1, +1].
+
+    +1.0 = clean JSON, parseable, has buy_quantities key
+    +0.3 = JSON found but missing keys or has extra text
+    -0.5 = truncated JSON (started but didn't finish)
+    -1.0 = no JSON at all (reasoning, garbage, non-English)
+    """
+    text = text.strip()
+
+    # Strip thinking tokens if present
+    if "<think>" in text:
+        think_end = text.find("</think>")
+        if think_end != -1:
+            text = text[think_end + 8:].strip()
+
+    # Find JSON
+    start = text.find("{")
+    if start == -1:
+        return -1.0  # No JSON at all
+
+    # Check how much non-JSON preamble there is
+    preamble = text[:start].strip()
+    preamble_penalty = min(len(preamble) / 200.0, 0.3)  # Up to -0.3 for long preambles
+
+    # Try to find matching close brace
+    depth = 0
+    end = -1
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
+    if end == -1:
+        return -0.5  # Truncated JSON
+
+    # Try to parse
+    try:
+        data = json.loads(text[start:end + 1])
+        if "buy_quantities" in data:
+            return 1.0 - preamble_penalty  # Good JSON
+        return 0.3 - preamble_penalty  # Parseable but missing key fields
+    except (json.JSONDecodeError, ValueError):
+        return -0.3  # Looks like JSON but malformed
+
+
 def step_reward(completions, task_name, prior_actions, **kwargs):
     """Score each completion by parsing it, replaying env, stepping once.
 
-    Args:
-        completions: list of model-generated text (G per prompt)
-        task_name: list of task names (dataset column, repeated for G completions)
-        prior_actions: list of JSON-encoded action histories (dataset column)
-
-    Returns:
-        list of float rewards from the real environment
+    Returns combined reward: env_reward + FORMAT_REWARD_WEIGHT * format_score.
+    The format score teaches the model to output valid JSON instead of rambling.
     """
     rewards = []
     batch_components = []
     for completion, tname, actions_json in zip(completions, task_name, prior_actions):
         try:
-            # Replay to get env at this step
-            env = replay_to_step(tname, actions_json)
-
             # Conversational format: completion is [{"role": "assistant", "content": "..."}]
-            # Standard format: completion is a string
             if isinstance(completion, list):
                 text = completion[0]["content"] if completion else ""
             else:
                 text = str(completion)
 
+            # Score format quality first
+            format_score = _score_format(text)
+
+            # Replay to get env at this step
+            env = replay_to_step(tname, actions_json)
             action = parse_action(text)
 
             # Step once and get real reward
             obs = env.step(action)
-            rewards.append(obs.reward)
-            batch_components.append(getattr(env, "reward_components", {}))
+            env_reward = obs.reward
+
+            # Combined: env reward + format bonus/penalty
+            total_reward = env_reward + FORMAT_REWARD_WEIGHT * format_score
+            rewards.append(total_reward)
+
+            components = getattr(env, "reward_components", {})
+            components["format_score"] = format_score
+            batch_components.append(components)
         except Exception as e:
             log.debug(f"Reward computation failed: {e}")
-            rewards.append(-1.0)
-            batch_components.append({})
+            # Failed completely = worst format + bad env reward
+            rewards.append(-1.0 + FORMAT_REWARD_WEIGHT * (-1.0))
+            batch_components.append({"format_score": -1.0})
 
     # Log batch stats
     _step_counter[0] += 1
@@ -129,7 +189,7 @@ def step_reward(completions, task_name, prior_actions, **kwargs):
     if batch_components and any(batch_components):
         comp_means = {}
         for key in ["R_directives", "R_planning", "R_revenue", "R_fulfillment", "R_waste",
-                     "milestone_bonus", "directive_penalty", "hard_penalty"]:
+                     "milestone_bonus", "directive_penalty", "hard_penalty", "format_score"]:
             vals = [c.get(key, 0.0) for c in batch_components if c]
             comp_means[key] = sum(vals) / len(vals) if vals else 0.0
         comp_means["step"] = _step_counter[0]
@@ -155,7 +215,7 @@ def load_grpo_dataset(filepath):
             examples.append({
                 "prompt": [
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": row["observation"]},
+                    {"role": "user", "content": row["observation"] + "\n\n/no-think"},
                 ],
                 "task_name": row["task_name"],
                 "prior_actions": row["prior_actions"],
@@ -561,6 +621,7 @@ def main():
     log.info(f"Max completion: {MAX_COMPLETION}")
     log.info(f"LoRA rank: {LORA_RANK}")
     log.info(f"Learning rate: {LEARNING_RATE}")
+    log.info(f"Format reward weight: {FORMAT_REWARD_WEIGHT}")
 
     dataset = load_grpo_dataset(GRPO_DATA_FILE)
 
@@ -570,8 +631,20 @@ def main():
         load_in_4bit=True,
         fast_inference=True,
         max_lora_rank=LORA_RANK,
-        gpu_memory_utilization=0.9,
+        gpu_memory_utilization=0.5,
+        enable_sleep_mode=False,
     )
+
+    # --- Disable Qwen3 thinking mode ---
+    # This is the key fix: Qwen3 has a "thinking" mode that generates <think>...</think>
+    # tokens before the actual response. This wastes tokens and often means the JSON
+    # gets truncated. We disable it by setting enable_thinking=False on the tokenizer.
+    if hasattr(tokenizer, 'enable_thinking'):
+        tokenizer.enable_thinking = False
+        log.info("Disabled Qwen3 thinking mode on tokenizer")
+    # Also try chat_template approach for older versions
+    if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template and 'enable_thinking' in str(tokenizer.chat_template):
+        log.info("Qwen3 chat template detected — thinking will be disabled via enable_thinking=False")
 
     model = FastLanguageModel.get_peft_model(
         model,
@@ -594,25 +667,40 @@ def main():
         bf16=True,
         logging_steps=1,
         save_strategy="epoch",
+
+        push_to_hub=True,
+        hub_model_id="saketh1201/Qwen3-4B-Inventory-GRPO",
+        hub_strategy="checkpoint",
+        
         max_completion_length=MAX_COMPLETION,
         num_generations=NUM_GENERATIONS,
         report_to="none",
         use_vllm=False,  # Unsloth's fast_inference handles vLLM internally
+        max_grad_norm=1,
 
         # --- GRPO Training Tricks (see README) ---
         # DAPO: Asymmetric clipping prevents entropy collapse by allowing
         # exploration of low-probability tokens (wider upper bound)
-        epsilon_low=0.2,
-        epsilon_high=0.28,
+        # epsilon_low=0.2,
+        # epsilon_high=0.28,
         # Dr. GRPO: Fixed denominator normalization removes response-length
         # bias — longer wrong answers no longer get softer gradients
         loss_type="dr_grpo",
         # Mask truncated completions instead of assigning them negative
         # reward, which confuses the model about valid reasoning paths
         mask_truncated_completions=True,
-        dataset_num_proc=2,  
         optim="adamw_8bit"
     )
+
+    generation_kwargs = {
+        "max_new_tokens": MAX_COMPLETION,
+        "min_new_tokens": 100,   # Force at least some output
+        "do_sample": True,
+        "temperature": 0.8,      # Need some temp for GRPO exploration
+        "top_p": 0.95,
+        "eos_token_id": tokenizer.eos_token_id,
+        "pad_token_id": tokenizer.pad_token_id,
+    }
 
     trainer = GRPOTrainer(
         model=model,
@@ -621,6 +709,8 @@ def main():
         args=training_args,
         train_dataset=dataset,
     )
+
+    model.generation_config.update(**generation_kwargs)
 
     log.info("Starting single-turn GRPO training...")
     trainer.train()
